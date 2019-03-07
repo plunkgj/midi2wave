@@ -1,6 +1,6 @@
 {
     "train_config": {
-	"device": "cuda:1",
+	"device": "cuda",
         "output_directory": "./checkpoints/",
         "epochs": 100000,
         "learning_rate": 1e-3,
@@ -14,15 +14,16 @@
 	"min_randsamp_freq": 0.12,
 	"max_randsamp_freq": 0.9,
 	"max_randsamp_iter": 40000,
-	"pred_loops_min": 1,
-	"pred_loops_max": 1,
-	"incr_pred_loops_iters": 1,
-	"under_pred_loops_prob": 0.5
+	"sample_loops_min": 1,
+	"sample_loops_max": 1,
+	"incr_sample_loops_iters": 2500,
+	"initial_epsilon": 1,
+	"final_epsilon": 0.1
     },
    
     "data_config": {
 	"dataset_path": "../deep_music/processed_data/train/",
-	"segment_length": 6.0,
+	"segment_length": 2.0,
 	"audio_hz": 16000,
 	"midi_hz": 250,
 	"only_onsets": true,
@@ -37,11 +38,11 @@
     "wavenet_config": {
 	"quantized_input": true,
         "n_in_channels": 256,
-        "n_layers": 30,
+        "n_layers": 10,
         "max_dilation": 1024,
         "n_residual_channels": 64,
-        "n_skip_channels": 256,
-	"n_skip_to_out_channels": 64,
+        "n_skip_channels": 64,
+	"n_skip_to_out_channels": 32,
         "n_out_channels": 9,
         "n_cond_channels": 89,
 	"drop_prob": 0.0369,

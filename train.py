@@ -53,6 +53,7 @@ from distributed import init_distributed, apply_gradient_allreduce, reduce_tenso
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 
+
 class CrossEntropyLoss(torch.nn.Module):
     def __init__(self):
         super(CrossEntropyLoss, self).__init__()
@@ -71,6 +72,15 @@ class CrossEntropyLoss(torch.nn.Module):
         inputs = inputs.contiguous()
         inputs = inputs.view(-1, self.num_classes)
         return torch.nn.CrossEntropyLoss()(inputs, targets)
+
+class LinDecay(torch.nn.Module):
+    def __init__(self, start_y, end_y, dx):
+        self.M = (start_y - end_y) / dx
+        self.B = start_y
+
+    def forward(self, x):
+        # input is scalar
+        return (M * x) + B
 
     
 def load_checkpoint(checkpoint_path, model, optimizer):
@@ -136,7 +146,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
           use_logistic_mixtures=False, n_mixtures=3,
           min_randsamp_freq=0, max_randsamp_freq=0, max_randsamp_iter=1,
           audio_hz=16000, midi_hz=250,
-          pred_loops_min=1, pred_loops_max=1, incr_pred_loops_iters=1000, under_pred_loops_prob=0):
+          sample_loops_min=1, sample_loops_max=1, incr_sample_loops_iters=1000, initial_epsilon=1, final_epsilon=0):
 
     device = torch.device(device)
     
@@ -147,11 +157,13 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
         init_distributed(rank, num_gpus, group_name, **dist_config)
 
     if use_logistic_mixtures:
+        sampler = DML.SampleDiscretizedMixLogistics()
         criterion = DML.DiscretizedMixLogisticLoss()
     else:
+        sampler = utils.GumbelMaxSampler()
         criterion = CrossEntropyLoss()
 
-    if (use_cond_wavenet):
+    if use_cond_wavenet:
         model = Wavenet_With_Condnet(wavenet_config, cond_wavenet_config).to(device)
     else:
         model = Wavenet(**wavenet_config).to(device)
@@ -179,69 +191,71 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                               pin_memory=False,
                               drop_last=True)
 
-    # Get shared output_directory ready
+    # Get shared output_directory ready for distributed
     if rank == 0:
         if not os.path.isdir(output_directory):
             os.makedirs(output_directory)
             os.chmod(output_directory, 0o775)
         print("output directory", output_directory)
 
-    #Initialize training variables
+    # Initialize training variables
+    epoch_offset = max(0, int(iteration / len(train_loader)))
+    start_iter = iteration
+    
     loss_idx = 0
     loss_sum = 0
     randsamp_freq = min_randsamp_freq
-    epoch_offset = max(0, int(iteration / len(train_loader)))
-    start_iter = iteration
-    pred_loops = pred_loops_min
 
-    # update learning rates
-    lrs = learning_rate * (torch.ones(pred_loops) / pred_loops)
+    sample_loops = sample_loops_min
+    epsilon = [initial_epsilon]
+    eps_decay = LinDecay(initial_epsilon, final_epsilon, incr_sample_loops_iters)
     
-    model.train()    
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
 
             model.zero_grad()
-            x, y = batch
-
-            #FLAG option to add noise here
+            x, y_true = batch
+            x.to(device)
+            y_true.to(device)            
             
+            #FLAG option to add noise here
+
+            # scheduled sampling (https://arxiv.org/abs/1506.03099)
+            y = y_true.clone().to(device)
+            print(y.device)
+            model.eval()
+            for p in range(sample_loops):
+                y_preds = model((x, y))
+                y_samples = sampler(y_preds)
+                mask = torch.zeros(y_samples.size()).uniform_() > epsilon[p]
+
+                print("y, y_samples, mask:")
+                print(y.size())
+                print(y_preds.size())
+                print(mask.size())
+                
+                y = (y_samples * mask) + (y * -(1 - mask))
+            
+            #debug.VerifyData(x, y, y_preds, iteration)
+
+            # forward pass w/ autograd
             x = as_Variable(x, device).float()
             y = as_Variable(y, device)
-
-            x_in = (x, y)
-            y_preds = model(x_in)
-
-            #debug.VerifyData(x, y, y_pred, iteration)
+            # do I need grad for y_true?
             
-            loss = criterion(y_preds, y)
+            model.train()
+            y_preds = model((x, y))
+            loss = criterion(y_preds, y_true)
+            
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
                 reduced_loss = loss.data.item()
             loss.backward()
-            #optimizer.lr = lrs[0]
             optimizer.step()
-            #lrs[0] = reduced_loss
             print("loss:        {}:\t{:.9f}".format(iteration, reduced_loss))
-            
-            if (pred_loops > 1):
-                for p in range(pred_loops-1):
-                    y_preds = train_on_preds(x, y, y_preds, model)
-                    loss = criterion(y_preds, y)
-                    reduced_loss = loss.data.item()
-                    loss.backward()
-                    optimizer.lr = lrs[p+1]
-                    optimizer.step()
-                    lrs[p+1] = reduced_loss
-                    print("pred loss " + str(p+1)  + ": {}:\t{:.9f}".format(iteration, reduced_loss))
-                          
-                # update learning rates
-                # softmax(exp(-loss))
-                # highest lr for iteration with most loss
-                lrs = learning_rate * F.softmax(lrs, dim=0)
 
             loss_sum += reduced_loss
             loss_idx += 1
@@ -263,6 +277,13 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             iteration += 1
 
+            # update sample chance (epsilon)
+            if (sample_loops < sample_loops_max):
+                epsilon[-1] = eps_decay(iteration % incr_sampling_loop_iters)
+                if (iteration % incr_sampling_loop_iters == 0):
+                    sample_loops = sample_loops+1
+                    epsilon += [initial_epsilon]
+
             # Update randsamp freq
             """
             if (iteration < max_randsamp_iter):
@@ -270,9 +291,6 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                 freq_inc = max_randsamp_freq - min_randsamp_freq
                 randsamp_freq = ((freq_inc/iter_inc)*(iteration - start_iter))
             """
-            if (pred_loops < pred_loops_max) and (iteration % incr_pred_loops_iters == 0):
-                pred_loops = pred_loops+1
-                lrs = torch.cat([lrs, torch.FloatTensor([0])])
             
             del loss
 
