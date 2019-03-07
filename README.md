@@ -21,10 +21,10 @@ Components of midi2wav unimplemented:
 
 //TODO: Add more detail here about resample and preprocess_maestro commands
 
-*Download the Maestro dataset (>100 GBs) [here](https://storage.googleapis.com/magentadata/datasets/maestro/v1.0.0/maestro-v1.0.0.zip). 
-*Run resample.py to downsample and mono-ize audio 
-*Prepare a processed data directory: mkdir test_data 
-*Run preprocess_maestro.py to save wavenet-ready data to disk 
+* Download the Maestro dataset (>100 GBs) [here](https://storage.googleapis.com/magentadata/datasets/maestro/v1.0.0/maestro-v1.0.0.zip). 
+* Run resample.py to downsample and mono-ize audio 
+* Prepare a processed data directory: mkdir test_data 
+* Run preprocess_maestro.py to save wavenet-ready data to disk 
 
 # Training
 
