@@ -125,21 +125,6 @@ def add_noise(y):
     for b, t in noise_idx:
         y_noise[b, t] = noise[b, t]
     
-def train_on_preds(x, y, y_preds, model, mask_freq=0):
-    """
-    Work-in-progress, just removed from train loop for readability
-    """
-    # if not batched add batch dim
-    if (y_preds.size() != 3):
-        y_preds.unsqueeze(0)
-
-    gumbel_noise = utils.gumbel_noise_like(y_preds)
-    y_next = torch.argmax(y_preds+gumbel_noise, dim=1)
-
-    model.zero_grad()    
-    y_preds = model((x, y_next))
-    return y_preds    
-    
     
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
           iters_per_checkpoint, batch_size, seed, checkpoint_path, use_cond_wavenet,
@@ -224,32 +209,20 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             # scheduled sampling (https://arxiv.org/abs/1506.03099)
             y = y_true.clone()
+            model.eval()
             for p in range(sample_loops):
-                print(y.device)
-                print(x.device)                
-                y_preds = model((x, y), training=False)
-                
+                y_preds = model((x, y), training=False)                
                 y_samples = sampler(y_preds)
-                y_samples = torch.round(y_samples).long()
                 mask = torch.zeros(y_samples.size()).uniform_() > epsilon[p]
                 mask = mask.long().to(device)
-                
-                print("y, y_preds, y_samples, mask:")
-                print(y.size())
-                print(y_samples.size())                
-                print(y_preds.size())
-                print(mask.size())
-                one = (y_samples * mask)
-                two = (y * -(1. - mask))
-                y = (y_samples * mask) + (y * -(1. - mask))
+                y = (y_samples * mask) + (y * -(mask - 1.))
             
-            #debug.VerifyData(x, y, y_preds, iteration)
-
             # forward pass w/ autograd
-            x = as_Variable(x, device).float()
+            x = as_Variable(x, device)
             y = as_Variable(y, device)
             # do I need grad for y_true?
-            
+
+            model.train()
             y_preds = model((x, y))
             loss = criterion(y_preds, y_true)
             

@@ -94,7 +94,7 @@ class SampleDiscretizedMixLogistics(torch.nn.Module):
     def __init__(self):
         super(SampleDiscretizedMixLogistics, self).__init__()
     
-    def forward(self, l):
+    def forward(self, l, quantize_output=True):
         """
         Expects (B x 3*n_mix x T) input
         """
@@ -154,6 +154,8 @@ class SampleDiscretizedMixLogistics(torch.nn.Module):
         x = torch.clamp(x, -1, 1)
 
         x = (x+1) * 127.5
-        #x = torch.round(x)
+        
+        if quantize_output:
+            x = torch.round(x).long()
         
         return x
