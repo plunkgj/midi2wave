@@ -81,7 +81,7 @@ class LinDecay(torch.nn.Module):
 
     def forward(self, x):
         # input is scalar
-        return (self.M * x) + self.B
+        return self.B - (self.M * x)
 
     
 def load_checkpoint(checkpoint_path, model, optimizer):
@@ -261,7 +261,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             # update sample chance (epsilon)
             if (sample_loops <= sample_loops_max):
-                epsilon[-1] = eps_decay(iteration % incr_sample_loops_iters)
+                epsilon[-1] = eps_decay((iteration-start_iter) % incr_sample_loops_iters)
                 if (iteration % incr_sample_loops_iters == 0):
                     sample_loops = sample_loops+1
                     epsilon += [initial_epsilon]
