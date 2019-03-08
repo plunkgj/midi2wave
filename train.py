@@ -149,7 +149,6 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
           sample_loops_min=1, sample_loops_max=1, incr_sample_loops_iters=1000, initial_epsilon=1, final_epsilon=0):
 
     device = torch.device(device)
-    
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
@@ -209,34 +208,40 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     sample_loops = sample_loops_min
     epsilon = [initial_epsilon]
     eps_decay = LinDecay(initial_epsilon, final_epsilon, incr_sample_loops_iters)
-    
+
+    model.train()    
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
 
             model.zero_grad()
-            x, y_true = batch
-            x.to(device)
-            y_true.to(device)            
-            
+            x, y = batch
+            x = x.to(device)
+            y_true = y.to(device)
+
             #FLAG option to add noise here
 
             # scheduled sampling (https://arxiv.org/abs/1506.03099)
-            y = y_true.clone().to(device)
-            print(y.device)
-            model.eval()
+            y = y_true.clone()
             for p in range(sample_loops):
-                y_preds = model((x, y))
+                print(y.device)
+                print(x.device)                
+                y_preds = model((x, y), training=False)
+                
                 y_samples = sampler(y_preds)
+                y_samples = torch.round(y_samples).long()
                 mask = torch.zeros(y_samples.size()).uniform_() > epsilon[p]
-
-                print("y, y_samples, mask:")
+                mask = mask.long().to(device)
+                
+                print("y, y_preds, y_samples, mask:")
                 print(y.size())
+                print(y_samples.size())                
                 print(y_preds.size())
                 print(mask.size())
-                
-                y = (y_samples * mask) + (y * -(1 - mask))
+                one = (y_samples * mask)
+                two = (y * -(1. - mask))
+                y = (y_samples * mask) + (y * -(1. - mask))
             
             #debug.VerifyData(x, y, y_preds, iteration)
 
@@ -245,7 +250,6 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             y = as_Variable(y, device)
             # do I need grad for y_true?
             
-            model.train()
             y_preds = model((x, y))
             loss = criterion(y_preds, y_true)
             
