@@ -75,12 +75,13 @@ class CrossEntropyLoss(torch.nn.Module):
 
 class LinDecay(torch.nn.Module):
     def __init__(self, start_y, end_y, dx):
+        super(LinDecay, self).__init__()
         self.M = (start_y - end_y) / dx
         self.B = start_y
 
     def forward(self, x):
         # input is scalar
-        return (M * x) + B
+        return (self.M * x) + self.B
 
     
 def load_checkpoint(checkpoint_path, model, optimizer):
@@ -191,7 +192,11 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     randsamp_freq = min_randsamp_freq
 
     sample_loops = sample_loops_min
-    epsilon = [initial_epsilon]
+    epsilon = []
+    for e in range(sample_loops_min - 1):
+        epsilon += [final_epsilon]
+    epsilon += [initial_epsilon]
+    print(epsilon)
     eps_decay = LinDecay(initial_epsilon, final_epsilon, incr_sample_loops_iters)
 
     model.train()    
@@ -255,9 +260,9 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             iteration += 1
 
             # update sample chance (epsilon)
-            if (sample_loops < sample_loops_max):
-                epsilon[-1] = eps_decay(iteration % incr_sampling_loop_iters)
-                if (iteration % incr_sampling_loop_iters == 0):
+            if (sample_loops <= sample_loops_max):
+                epsilon[-1] = eps_decay(iteration % incr_sample_loops_iters)
+                if (iteration % incr_sample_loops_iters == 0):
                     sample_loops = sample_loops+1
                     epsilon += [initial_epsilon]
 
