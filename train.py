@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import time
+from csv import DictWriter
 
 import numpy as np
 import torch
@@ -170,6 +171,11 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     loss_idx = 0
     loss_sum = 0
 
+    # write loss to csv file
+    loss_writer = DictWriter(open("checkpoints/train.csv", 'w', newline=''),
+                             fieldnames=['iteration', "loss"])
+    loss_writer.writeheader()
+    
     model.train()    
     # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, epochs):
@@ -203,8 +209,10 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             
             loss_sum += reduced_loss
             loss_idx += 1
-            if (iteration % 50 == 0):
+            if (iteration % 20 == 0):
                 print("floating avg: " + str(loss_sum/loss_idx))
+                loss_writer.writerow({"iteration": str(i),
+                                      "loss": str(reduced_loss)})
                 loss_sum = 0
                 loss_idx = 0
 

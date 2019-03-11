@@ -73,7 +73,6 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
         else:
             tmp_sample_loops = self.sample_loops
 
-        mask = torch.zeros(y.size())
         device = y.device
 
         for p in range(tmp_sample_loops):
@@ -81,8 +80,9 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
                 continue
             y_preds = self.model((x, y), training=False)                
             y_samples = self.sampler(y_preds)
-            mask = mask.uniform_() > self.epsilon[p]
-            mask = mask.long().to(device)
+
+            mask = torch.zeros(y.size()).uniform_() > self.epsilon[p]
+            mask = mask.long().to(device)            
             y = (y_samples * mask) + (y * -(mask - 1.))
 
         return y
@@ -95,8 +95,6 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
             # done increasing sample loops and final epsilon decay
             return
         
-        print("ITERATION " + str(self.iteration))
-        
         self.loss_memory.appendleft(loss)
         self.loss_sum += loss        
         self.loss_sum -= self.loss_memory.pop()
@@ -105,8 +103,6 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
         if self.decaying:
             # update sample chance (epsilon)            
             self.epsilon[-1] = self.decay(self.iteration)
-
-            print(self.epsilon)
             
             # if done decaying:
             if (self.iteration == self.decay_iters-1):
@@ -114,26 +110,24 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
                 # if done with all sample loops
                 if (self.sample_loops == self.end_loops):
                     self.decaying = None
-                    print("Done with scheduled sampling")
+                    print("########done with sched sampling#########")
                     
                 else: # start waiting
                     self.decaying = False
                     self.iteration = -1
                     self.prev_loss_check = av_loss
-                    print("starting to wait for error to stop ddecreasssing")
+                    print("########waiting for loss to plateau#########")
                     
         # if not decaying, check loss every "patience" iterations
         elif (self.iteration != 0) and (self.iteration%self.patience == 0):
             if self.prev_loss_check is not None:
-                print("prev loss vs now:")
-                print(str(self.prev_loss_check) + ", " + str(av_loss))
                 
                 if av_loss > (self.prev_loss_check+self.threshold):
-                    self.sample_loops += 0
+                    self.sample_loops += 1
                     self.epsilon += [self.start_epsilon]
                     self.iteration = -1
                     self.decaying = True
-                    print("starding decay")
+                    print("########starting new sched sample loop#########")
                     
             self.prev_loss_check = av_loss        
 

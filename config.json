@@ -1,29 +1,33 @@
 {
     "train_config": {
-	"device": "cuda",
+	"device": "cuda:1",
         "output_directory": "./checkpoints/",
         "epochs": 100000,
         "learning_rate": 1e-3,
         "iters_per_checkpoint": 500,
         "batch_size": 1,
         "seed": 1234,
-        "checkpoint_path": "checkpoints/wavenet_2500",
+        "checkpoint_path": "",
 	"use_cond_wavenet": false,
 	"use_logistic_mixtures": true,
-	"n_mixtures": 3,
-	"min_randsamp_freq": 0.12,
-	"max_randsamp_freq": 0.9,
-	"max_randsamp_iter": 40000,
-	"sample_loops_min": 1,
-	"sample_loops_max": 3,
-	"incr_sample_loops_iters": 2500,
-	"initial_epsilon": 1,
-	"final_epsilon": 0.1
+	"n_mixtures": 3
     },
-   
+
+    "scheduled_sampler_config": {
+	"start_loops": 0,
+	"end_loops": 2,	
+	"start_epsilon": 1,
+	"end_epsilon": 0.1,
+	"decay_iters": 2500,
+	"patience": 250,
+	"threshold": -0.2,
+	"underloop_prob": 0.1,
+	"start_decaying": true
+    },
+    
     "data_config": {
 	"dataset_path": "../deep_music/processed_data/train/",
-	"segment_length": 2.0,
+	"segment_length": 5.0,
 	"audio_hz": 16000,
 	"midi_hz": 250,
 	"only_onsets": true,
@@ -52,22 +56,7 @@
 	"upsample_by_copy": true,
 	"upsamp_conv_window": 64
     },
-    
-    "cond_wavenet_config": {
-	"quantized_input": false,
-        "n_in_channels": 89,
-        "n_layers": 18,
-        "max_dilation": 64,
-        "n_residual_channels": 32,
-        "n_skip_channels": 89,
-	"n_skip_to_out_channels": 89,
-        "n_out_channels": 89,
-        "n_cond_channels": 1,
-	"drop_prob": 0.01,
-	"in_act_on": true,
-	"cond_act_on": true,
-	"upsamp_scale": 1,
-	"upsample_by_copy": true,
-        "upsamp_conv_window": 800
-    }
+
+    "cond_wavenet_config":{}
+	
 }
