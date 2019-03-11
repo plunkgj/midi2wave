@@ -42,8 +42,9 @@ from torch.autograd import Variable
 from scipy.io.wavfile import write
 
 import utils
-from utils import as_Variable, mu_law_encode
+from utils import as_variable, mu_law_encode
 from midi2multihot import Midi2SampMultihot
+from scheduled_sampling  import ScheduledSamplerWithPatience
 import debug
 from nn.wavenet import Wavenet
 from nn import discretized_mix_logistics as DML
@@ -72,16 +73,6 @@ class CrossEntropyLoss(torch.nn.Module):
         inputs = inputs.contiguous()
         inputs = inputs.view(-1, self.num_classes)
         return torch.nn.CrossEntropyLoss()(inputs, targets)
-
-class LinDecay(torch.nn.Module):
-    def __init__(self, start_y, end_y, dx):
-        super(LinDecay, self).__init__()
-        self.M = (start_y - end_y) / dx
-        self.B = start_y
-
-    def forward(self, x):
-        # input is scalar
-        return self.B - (self.M * x)
 
     
 def load_checkpoint(checkpoint_path, model, optimizer):
@@ -115,24 +106,11 @@ def save_checkpoint_cond(model, device, optimizer, learning_rate, iteration, fil
                 'optimizer': optimizer.state_dict(),
                 'learning_rate': learning_rate}, filepath)
 
-def add_noise(y):
-    """
-    Work-in-progress, just removed from train loop for readability
-    """
-    noise = torch.randint(low=0, high=255, size=y.size())
-    y_noise = y.clone()
-    mask = torch.FloatTensor(y.size(0), y.size(-1)).uniform_() > (1 - randsamp_freq)
-    noise_idx = mask.nonzero()
-    for b, t in noise_idx:
-        y_noise[b, t] = noise[b, t]
-    
     
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
-          iters_per_checkpoint, batch_size, seed, checkpoint_path, use_cond_wavenet,
-          use_logistic_mixtures=False, n_mixtures=3,
-          min_randsamp_freq=0, max_randsamp_freq=0, max_randsamp_iter=1,
-          audio_hz=16000, midi_hz=250,
-          sample_loops_min=1, sample_loops_max=1, incr_sample_loops_iters=1000, initial_epsilon=1, final_epsilon=0):
+          iters_per_checkpoint, batch_size, seed, checkpoint_path,
+          use_cond_wavenet=False, use_logistic_mixtures=False, n_mixtures=3,
+          audio_hz=16000, midi_hz=250):
 
     device = torch.device(device)
     torch.manual_seed(seed)
@@ -156,6 +134,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     if num_gpus > 1:
         model = apply_gradient_allreduce(model)
 
+    scheduled_sampler = ScheduledSamplerWithPatience(model, sampler, **scheduled_sampler_config)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.0004)
 
     # Load checkpoint if one exists
@@ -189,15 +169,6 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     
     loss_idx = 0
     loss_sum = 0
-    randsamp_freq = min_randsamp_freq
-
-    sample_loops = sample_loops_min
-    epsilon = []
-    for e in range(sample_loops_min - 1):
-        epsilon += [final_epsilon]
-    epsilon += [initial_epsilon]
-    print(epsilon)
-    eps_decay = LinDecay(initial_epsilon, final_epsilon, incr_sample_loops_iters)
 
     model.train()    
     # ================ MAIN TRAINING LOOP! ===================
@@ -207,38 +178,29 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             model.zero_grad()
             x, y = batch
+
             x = x.to(device)
             y_true = y.to(device)
-
-            #FLAG option to add noise here
-
-            # scheduled sampling (https://arxiv.org/abs/1506.03099)
             y = y_true.clone()
-            model.eval()
-            for p in range(sample_loops):
-                y_preds = model((x, y), training=False)                
-                y_samples = sampler(y_preds)
-                mask = torch.zeros(y_samples.size()).uniform_() > epsilon[p]
-                mask = mask.long().to(device)
-                y = (y_samples * mask) + (y * -(mask - 1.))
-            
-            # forward pass w/ autograd
-            x = as_Variable(x, device)
-            y = as_Variable(y, device)
-            # do I need grad for y_true?
 
-            model.train()
+            model.eval()
+            y = scheduled_sampler(x, y)                
+
+            model.train()            
+            x = as_variable(x, device)
+            y = as_variable(y, device)
             y_preds = model((x, y))
-            loss = criterion(y_preds, y_true)
             
+            loss = criterion(y_preds, y_true)
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
                 reduced_loss = loss.data.item()
             loss.backward()
             optimizer.step()
+            scheduled_sampler.update(reduced_loss)            
             print("loss:        {}:\t{:.9f}".format(iteration, reduced_loss))
-
+            
             loss_sum += reduced_loss
             loss_idx += 1
             if (iteration % 50 == 0):
@@ -257,25 +219,9 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                         save_checkpoint(model, device, optimizer, learning_rate, iteration,
                                         checkpoint_path)
 
-            iteration += 1
-
-            # update sample chance (epsilon)
-            if (sample_loops <= sample_loops_max):
-                epsilon[-1] = eps_decay((iteration-start_iter) % incr_sample_loops_iters)
-                if (iteration % incr_sample_loops_iters == 0):
-                    sample_loops = sample_loops+1
-                    epsilon += [initial_epsilon]
-
-            # Update randsamp freq
-            """
-            if (iteration < max_randsamp_iter):
-                iter_inc = max_randsamp_iter - start_iter
-                freq_inc = max_randsamp_freq - min_randsamp_freq
-                randsamp_freq = ((freq_inc/iter_inc)*(iteration - start_iter))
-            """
-            
+            iteration += 1            
             del loss
-
+        # end loop
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -294,13 +240,15 @@ if __name__ == "__main__":
     train_config = config["train_config"]
     global data_config
     data_config = config["data_config"]
+    global scheduled_sampler_config
+    scheduled_sampler_config = config["scheduled_sampler_config"]
     global dist_config
     dist_config = config["dist_config"]
     global wavenet_config 
     wavenet_config = config["wavenet_config"]
     global cond_wavenet_config
     cond_wavenet_config = config["cond_wavenet_config"]
-
+    
     num_gpus = torch.cuda.device_count()
     if num_gpus > 1:
         if args.group_name == '':

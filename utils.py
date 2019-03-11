@@ -54,7 +54,7 @@ def load_filepaths_and_text(filename, split="|"):
         filepaths_and_text = [line.strip().split(split) for line in f]
     return filepaths_and_text
 
-def as_Variable(x, device):
+def as_variable(x, device, requires_grad=True):
     x = x.contiguous()
     if device.type == "cuda":
         x = x.cuda(device, non_blocking=True)
