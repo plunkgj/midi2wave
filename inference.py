@@ -35,9 +35,9 @@ from scipy.io.wavfile import write
 import numpy as np
 import torch
 import torch.nn.functional as F
-import wavenet_utils as utils
+import utils
 import debug
-import discretized_mix_logistics as DML
+from nn.discretized_mix_logistics import SampleDiscretizedMixLogistics
 
 import matplotlib
 matplotlib.use('Agg')
@@ -50,8 +50,7 @@ def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 def sample_output(output):
-    output = output.view(-1, 3)
-    
+    output = output.view(-1, 3)    
 
 # Infer one midi-upsample-field chunk at a time
 def py_infer(midi_files, model_filename, output_dir, device, midi_hz, audio_hz, upsample_field_size, use_logistic_mix):
@@ -92,8 +91,9 @@ def train_mode_output(midi_files, model_filename, output_dir, device,
     teacher_samples = teacher_length*audio_hz
 
     if use_logistic_mix:
-        sampler = DML.SampleDiscretizedMixLogistics()
-        
+        sampler = SampleDiscretizedMixLogistics()
+    else:
+        sampler = utils.CategoricalSampler()
     
     for filename in midi_files:
 
@@ -139,8 +139,6 @@ def pyinfer_teacher_forcing(midi_files, model_filename, output_dir, device, use_
 
     midi_files = utils.files_to_list(midi_files)
     model = torch.load(model_filename)['model'].to(device)
-
-    print(model)
     
     fig, ax = plt.subplots()
     for filename in midi_files:
@@ -165,6 +163,7 @@ def pyinfer_teacher_forcing(midi_files, model_filename, output_dir, device, use_
             teacher_samples = audio_target.size(-1)
             filename = filename + "_pyinfer_teacherforce.wav"
 
+        print(filename)
         print(teacher_samples)
         audio = model.inference(midi, use_logistic_mix=use_logistic_mix,
                                 teacher_audio=audio_target[:, :teacher_samples])
@@ -172,43 +171,6 @@ def pyinfer_teacher_forcing(midi_files, model_filename, output_dir, device, use_
         audio = audio.squeeze().cpu().numpy()
         write(filename, audio_hz, audio)
         
-        
-def train_mode_random(midi_files, model_filename, output_dir, midi_hz, audio_hz):
-
-    midi_files = utils.files_to_list(midi_files)
-    model = torch.load(model_filename)['model'].to(device)
-    
-    for filename in midi_files:
-
-        print(filename)
-        midi = torch.load(filename + ".midiX")
-        audio_target = torch.nn.functional.tanh(torch.randn([int(midi.size(-1) * (audio_hz / midi_hz))]))
-        audio_target = utils.mu_law_encode(audio_target)
-        
-        # Add a batch dimension
-        midi = midi.unsqueeze(0).to(device)
-        audio_target = audio_target.unsqueeze(0).to(device)
-        
-        model_output = model((midi, audio_target))
-        model_output = model_output.squeeze()
-        model_output = torch.nn.Softmax(dim=0)(model_output)
-        _, audio = model_output.max(dim=0)
-        
-        audio = utils.mu_law_decode_numpy(audio.cpu().numpy())
-        #train_audio = utils.MAX_WAV_VALUE * train_audio
-        write(filename + "_rand.wav", 16000, audio)
-
-
-def test_dif_wavenets(args):
-
-    checkpoint_path = args.checkpoint_path[:-5]
-    number = int(args.checkpoint_path[-5:])
-    print(checkpoint_path)
-    print(number)
-    for i in range(number, number+3700, 1000):
-        this_path = checkpoint_path + str(i)
-        print(this_path)
-        pyinfer_teacher_forcing(args.filelist_path, this_path, args.output_dir, args.audio_hz, args.teacher_length, wavenet_num=i)
 
 if __name__ == "__main__":
     import argparse

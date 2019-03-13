@@ -124,7 +124,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
         sampler = DML.SampleDiscretizedMixLogistics()
         criterion = DML.DiscretizedMixLogisticLoss()
     else:
-        sampler = utils.GumbelMaxSampler()
+        sampler = utils.CategoricalSampler()
         criterion = CrossEntropyLoss()
 
     if use_cond_wavenet:
@@ -185,16 +185,14 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             model.zero_grad()
             x, y = batch
 
-            x = x.to(device)
-            y_true = y.to(device)
-            y = y_true.clone()
-
-            model.eval()
-            y = scheduled_sampler(x, y)                
-
-            model.train()            
             x = as_variable(x, device)
             y = as_variable(y, device)
+            y_true = y.clone()
+
+            #model.eval()
+            y = scheduled_sampler(x, y)                
+
+            #model.train()            
             y_preds = model((x, y))
             
             loss = criterion(y_preds, y_true)

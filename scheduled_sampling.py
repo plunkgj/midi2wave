@@ -57,8 +57,9 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
         for i in range(patience):
             self.loss_memory.append(0)
         self.prev_loss_check = None
-            
-    def forward(self, x, y):
+
+    #FLAG add a training param
+    def forward(self, x, y, training=True):
         """
         X and Y tensors for Wavenet training
         """
@@ -78,13 +79,13 @@ class ScheduledSamplerWithPatience(torch.nn.Module):
         for p in range(tmp_sample_loops):
             if (self.epsilon[p] == 1):
                 continue
-            y_preds = self.model((x, y), training=False)                
+            y_preds = self.model((x, y), training=training)                
             y_samples = self.sampler(y_preds)
 
             mask = torch.zeros(y.size()).uniform_() > self.epsilon[p]
             mask = mask.long().to(device)            
             y = (y_samples * mask) + (y * -(mask - 1.))
-
+            
         return y
 
     def update(self, loss):

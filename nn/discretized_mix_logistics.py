@@ -93,7 +93,9 @@ class SampleDiscretizedMixLogistics(torch.nn.Module):
     
     def __init__(self):
         super(SampleDiscretizedMixLogistics, self).__init__()
-    
+        self.categorical_sampler = utils.CategoricalSampler()
+        self.uniform_sampler = utils.UniformSampler()
+        
     def forward(self, l, quantize_output=True):
         """
         Expects (B x 3*n_mix x T) input
@@ -124,31 +126,29 @@ class SampleDiscretizedMixLogistics(torch.nn.Module):
         # pick which mixture component to use from mix_logits
         # uses "Gumbel-max trick" to sample from raw logits:
         # argmax(logits_i - gumbel_noise_i) is equal to sampling from softmax
-        gumbel_noise = utils.gumbel_noise_like(mix_logits)
-        logit_sel = torch.argmax(mix_logits+gumbel_noise, dim=1)
+        logit_sel = self.categorical_sampler(mix_logits)
 
-        #FLAG need to loop over batch dim because of how index_select works
-        means_sel = torch.zeros(0, length).to(device)
-        log_var_sel = torch.zeros(0, length).to(device)
-        
+        # get means and log_var at idx of selected logits
+        selected_means = torch.zeros(0, length).to(device)
+        selected_log_var = torch.zeros(0, length).to(device)
         time = torch.arange(length, dtype=torch.long)
         for b in range(n_batch):
-            b_sel = logit_sel[b].squeeze()
-            b_vec = torch.full([length], b, dtype=torch.long)
-            idx_sel = (b_vec, b_sel, time)
-            b_means = means[idx_sel].unsqueeze(0)
-            b_log_var = log_var[idx_sel].unsqueeze(0)
+            logits_b = logit_sel[b].squeeze()
+            batch_num_vec = torch.full([length], b, dtype=torch.long)
+            idx = (batch_num_vec, logits_b, time)
+            means_b = means[idx].unsqueeze(0)
+            log_var_b = log_var[idx].unsqueeze(0)
 
-            means_sel = torch.cat((means_sel, b_means), dim=0)
-            log_var_sel = torch.cat((log_var_sel, b_log_var), dim=0)            
+            selected_means = torch.cat((selected_means, means_b), dim=0)
+            selected_log_var = torch.cat((selected_log_var, log_var_b), dim=0)            
 
-        means = means_sel
-        log_var = log_var_sel
+        means = selected_means
+        log_var = selected_log_var
 
         # sample from logit_fcn to get devation from mixture mean
         # logit_fcn = inverse(sigmoid)
         # random uniform sampling of logit_fcn is equal to sampling from logistic distribution
-        u = torch.zeros(means.size()).uniform_(1e-5, (1 - 1e-5)).to(device)
+        u = self.uniform_sampler(means.size()).to(device)
         logit_fcn_sampls = torch.exp(log_var) * (torch.log(u) - torch.log(1. - u))
         x = means + logit_fcn_sampls
         x = torch.clamp(x, -1, 1)

@@ -38,7 +38,7 @@ from collections import deque
 import numpy as np
 import torch.nn.functional as F
 import utils
-import nn.discretized_mix_logistics as DML
+from nn.discretized_mix_logistics import SampleDiscretizedMixLogistics
 
 
 class Conv(torch.nn.Module):
@@ -333,7 +333,7 @@ class Wavenet(torch.nn.Module):
 
         assert((cond_features is not None) or (length > 0))
             
-        # get info from condition features
+        # get metadata from condition features
         if cond_features is not None:
             assert(len(cond_features.size()) == 3)
 
@@ -363,6 +363,11 @@ class Wavenet(torch.nn.Module):
         else:
             teacher_length = 0
 
+        if use_logistic_mix:
+            sampler = SampleDiscretizedMixLogistics()
+        else:
+            sampler = utils.CatagoricalSampler()
+            
         #################
         # inference loop:
         ##################

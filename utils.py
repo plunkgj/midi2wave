@@ -104,12 +104,12 @@ def gumbel_noise_like(X, floor=1e-5):
     return -torch.log(-torch.log(u))
 
 
-class GumbelMaxSampler(torch.nn.Module):
+class CategoricalSampler(torch.nn.Module):
 
     def __init__(self):
-        super(GumbelMaxSampler, self).__init__()
+        super(CategoricalSampler, self).__init__()
     
-    def forward(self, X, floor=1e-5):
+    def forward(self, X):
         """
         X is a unscaled probability distribution (B x C x T)
         """
@@ -117,5 +117,20 @@ class GumbelMaxSampler(torch.nn.Module):
         if (len(X.size()) == 2):
             X = X.unsqueeze(0)
 
-        g = gumbel_noise_like(X, floor)
-        return torch.argmax(X+g, dim=1)
+        X = torch.transpose(X, 1, 2)
+            
+        return torch.distributions.categorical.Categorical(logits=X).sample()
+
+class UniformSampler(torch.nn.Module):
+
+    def __init__(self):
+        super(UniformSampler, self).__init__()
+        
+    def forward(self, size, floor=1e-5):
+        """
+        shape is an array of Tensor shape
+        """
+
+        low = torch.full(size, floor)
+        high = torch.full(size, 1-floor)
+        return torch.distributions.uniform.Uniform(low, high).sample()
