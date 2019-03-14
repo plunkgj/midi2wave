@@ -3,25 +3,25 @@
 	"device": "cuda:1",
         "output_directory": "./checkpoints/",
         "epochs": 100000,
-        "learning_rate": 1e-4,
+        "learning_rate": 1e-3,
         "iters_per_checkpoint": 500,
         "batch_size": 1,
-        "seed": 369,
+        "seed": 5206,
         "checkpoint_path": "",
-	"use_cond_wavenet": false,
-	"use_logistic_mixtures": false,
+	"use_cond_wavenet": true,
+	"use_logistic_mixtures": true,
 	"n_mixtures": 3
     },
 
     "scheduled_sampler_config": {
-	"start_loops": 1,
-	"end_loops": 3,	
+	"start_loops": 0,
+	"end_loops": 0,	
 	"start_epsilon": 1,
 	"end_epsilon": 0.1,
-	"decay_iters": 10000,
-	"patience": 250,
-	"threshold": -0.2,
-	"underloop_prob": 0.04,
+	"decay_iters": 4000,
+	"patience": 1000,
+	"threshold": 0.5,
+	"underloop_prob": 0.0,
 	"start_decaying": true
     },
     
@@ -31,7 +31,8 @@
 	"audio_hz": 16000,
 	"midi_hz": 250,
 	"only_onsets": true,
-	"midi_channels": 89
+	"midi_channels": 89,
+	"no_pedal": true
     },
     
     "dist_config": {
@@ -42,21 +43,38 @@
     "wavenet_config": {
 	"quantized_input": true,
         "n_in_channels": 256,
-        "n_layers": 10,
-        "max_dilation": 1024,
+        "n_layers": 22,
+        "max_dilation": 2048,
         "n_residual_channels": 32,
         "n_skip_channels": 128,
-	"n_skip_to_out_channels": 256,
-        "n_out_channels": 256,
-        "n_cond_channels": 89,
-	"drop_prob": 0.0369,
+	"n_skip_to_out_channels": 64,
+        "n_out_channels": 9,
+        "n_cond_channels": 128,
+	"resblock_drop_prob": 0.2,
+	"outFC_drop_prob": 0.04,
 	"in_act_on": true,
 	"cond_act_on": true,
         "upsamp_scale": 64,
-	"upsample_by_copy": true,
+	"upsample_by_copy": false,
 	"upsamp_conv_window": 64
     },
 
-    "cond_wavenet_config":{}
-	
+    "cond_wavenet_config": {
+    	"quantized_input": false,
+        "n_in_channels": 88,
+        "n_layers": 12,
+        "max_dilation": 64,
+        "n_residual_channels": 32,
+        "n_skip_channels": 128,
+	"n_skip_to_out_channels": 128,
+        "n_out_channels": 128,
+        "n_cond_channels": 1,
+	"resblock_drop_prob": 0.0,
+	"outFC_drop_prob": 0.04,
+	"in_act_on": true,
+	"cond_act_on": true,
+        "upsamp_scale": 1,
+	"upsample_by_copy": true,
+	"upsamp_conv_window": 64
+    }	
 }

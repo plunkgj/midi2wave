@@ -20,7 +20,7 @@ import utils
 
 class Midi2SampMultihot(torch.utils.data.Dataset):
 
-    def __init__(self, dataset_path, segment_length, midi_hz, audio_hz, only_onsets, midi_channels, print_file_nums=False, epoch_length=None):
+    def __init__(self, dataset_path, segment_length, midi_hz, audio_hz, only_onsets, midi_channels, no_pedal, print_file_nums=False, epoch_length=None):
         
         self.dataset_path = dataset_path
         self.segment_length = segment_length
@@ -53,7 +53,7 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
         self.only_onsets = only_onsets
         self.audio_hz = audio_hz
         self.midi_hz = midi_hz
-
+        self.no_pedal = no_pedal
 
     def __getitem__(self, index):
 
@@ -84,6 +84,8 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
             if midi[0:88, :].nonzero()[0].shape[0] == 0: 
                 midi=None
 
+        if self.no_pedal:
+            midi = midi[:88]
         audio_start_pos = int(midi_start_pos * (self.audio_hz / self.midi_hz))
         audio = np.load(self.dataset_path + self.file_names[file_num] + ".npy", mmap_mode='r')
         audio = self.slice_audio(audio, audio_start_pos, midi)

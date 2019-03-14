@@ -1,7 +1,7 @@
 # Gary Plunkett
 # Feburary 2019
-# Wavenet with a conditioning wavenet used to preprocess midi features
-# a la RNN preprocessing
+# Wavenet with a context wavenet used to preprocess midi features,
+# as in "Fatcorized Music Modelling with the Maestro Dataset"
 
 import torch
 from nn.wavenet import Wavenet
@@ -11,8 +11,8 @@ class Wavenet_With_Condnet(torch.nn.Module):
 
         super(Wavenet_With_Condnet, self).__init__()
         
-        self.cond_wavenet = WaveNet(**condwavenet_params)
-        self.wavenet = WaveNet(**wavenet_params)
+        self.cond_wavenet = Wavenet(**condwavenet_params)
+        self.wavenet = Wavenet(**wavenet_params)
 
     def forward(self, forward_input, training=True):
 
@@ -40,8 +40,8 @@ class Wavenet_With_Condnet(torch.nn.Module):
     def inference(self, midi_features, **kwargs):
 
         print(midi_features.size())
-        null_fetaures = torch.zeros(midi_features.size(0), 1, midi_features.size(2)).to(midi_features.device)
-        cond_features = self.cond_wavenet.forward((null_features, midi_features))
+        null_fetaures = torch.zeros(midi_3features.size(0), 1, midi_features.size(2)).to(midi_features.device)
+        cond_features = self.cond_wavenet((null_features, midi_features))
         print(cond_features.size())
         
         return  self.wavenet.inference(cond_features, **kwargs)

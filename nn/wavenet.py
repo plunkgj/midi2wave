@@ -62,9 +62,11 @@ class Conv(torch.nn.Module):
         self.conv = torch.nn.Conv1d(in_channels, out_channels,
                                     kernel_size=kernel_size, stride=stride,
                                     dilation=dilation, bias=bias)
+
+        # Softsign activation recommended by DeepVoice3
         self.use_act = use_act
         if self.use_act:
-            self.act = torch.nn.Tanh()
+            self.act = torch.nn.Softsign()
         
         torch.nn.init.xavier_uniform_(
             self.conv.weight, gain=torch.nn.init.calculate_gain(w_init_gain))
@@ -110,11 +112,6 @@ class Conv(torch.nn.Module):
             B = self.conv.bias.data
             return F.conv1d(x0_x1, W, B)
 
-        #FLAG: remove this catch eventually
-        else:
-            print("Called infer_step on a non-causal wavenet!!!")
-            exit()
-
     def init_input_memory(self, x):
         # Initialize memory queue and fill w/ zero vectors
         # Each zero is a new view on same underlying storage (mem efficiency)
@@ -129,7 +126,7 @@ class UpsampleByRepetition(torch.nn.Module):
     """
     Upsample by repitition expects a (B x C x T) tensor
     Returns a (B x C x (T*upscale)) tensor
-    Doesn't copy underlying storage
+    Doesn't duplicate underlying storage
     """
     
     def __init__(self, upscale):
@@ -148,13 +145,13 @@ class UpsampleByRepetition(torch.nn.Module):
 class QuantizedInputLayer(torch.nn.Module):
     """
     Learns an embedding for quantized values (256 mu-qunatized audio)
-    Optionally applies a tanh activation
+    Optionally applies a softsign activation
     """
     
     def __init__(self, n_in_channels, n_out_channels, use_act):
         super(QuantizedInputLayer, self).__init__()
         self.embed = torch.nn.Embedding(n_in_channels, n_out_channels)
-        self.act = torch.nn.Tanh()
+        self.act = torch.nn.Softsign()
         self.use_act = use_act
 
     def forward(self, x):
@@ -168,7 +165,7 @@ class QuantizedInputLayer(torch.nn.Module):
 class Wavenet(torch.nn.Module):
     def __init__(self, quantized_input, n_in_channels, n_layers, max_dilation,
                  n_residual_channels, n_skip_channels, n_skip_to_out_channels, n_out_channels,
-                 drop_prob, n_cond_channels, in_act_on, cond_act_on,
+                 resblock_drop_prob, outFC_drop_prob, n_cond_channels, in_act_on, cond_act_on,
                  upsamp_scale, upsample_by_copy, upsamp_conv_window):
         super(Wavenet, self).__init__()
 
@@ -201,7 +198,8 @@ class Wavenet(torch.nn.Module):
             self.in_layer = Conv(n_in_channels, n_residual_channels, bias=False,
                                  w_init_gain='tanh', use_act=in_act_on)
 
-        self.dropout = torch.nn.Dropout(p=drop_prob)
+        self.resblock_dropout = torch.nn.Dropout(p=resblock_drop_prob)
+        self.outFC_dropout = torch.nn.Dropout(p=outFC_drop_prob)        
 
         self.conv_out = Conv(n_skip_channels, n_skip_to_out_channels,
                              bias=False, w_init_gain='relu')
@@ -245,7 +243,7 @@ class Wavenet(torch.nn.Module):
 
         for i in range(self.n_layers):
             if training:
-                forward_input = self.dropout(forward_input)
+                forward_input = self.resblock_dropout(forward_input)
             in_act = self.dilate_layers[i](forward_input)
             in_act = in_act + cond_input[:,i,:,:]            
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
@@ -255,7 +253,7 @@ class Wavenet(torch.nn.Module):
                 res_acts = self.res_layers[i](acts)
 
             forward_input = res_acts + forward_input
-            forward_input = forward_input * math.sqrt(0.5)
+            forward_input = forward_input * math.sqrt(0.5) #from DeepVoice3, reduce input variance early in training
 
             if i == 0:
                 output = self.skip_layers[i](acts)
@@ -263,11 +261,11 @@ class Wavenet(torch.nn.Module):
                 output = self.skip_layers[i](acts) + output
 
         if training:
-            output = self.dropout(output)
+            output = self.outFC_dropout(output)
         output = torch.nn.functional.relu(output, True)
         output = self.conv_out(output)
         if training:
-            output = self.dropout(output)
+            output = self.outFC_dropout(output)
         output = torch.nn.functional.relu(output, True)
         output = self.conv_end(output)
 
@@ -328,7 +326,7 @@ class Wavenet(torch.nn.Module):
         - If no features provided, generates number of samples equal to length parameter
         - Will use teacher audio as forward input, if provided
         - If teacher_audio_length < features_length, switches forward input to inference 
-              samples when teacher samples exhasted
+              samples when teacher samples exhasted.
         """
 
         assert((cond_features is not None) or (length > 0))
