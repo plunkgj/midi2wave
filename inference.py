@@ -68,8 +68,10 @@ def py_infer(midi_files, model_filename, output_dir, device, midi_hz, audio_hz, 
         
         # Load this midi file
         midiX = torch.load(filename + ".midiX")
+        if no_pedal:
+            midi = midi[:88]                
         midiX = torch.nn.functional.relu(midiX)
-
+        
         plt.cla()
         ax.spy(midiX, markersize=3, aspect="auto", origin='lower')
         plt.savefig(filename + "_inInfer.png")        
@@ -99,6 +101,10 @@ def train_mode_output(midi_files, model_filename, output_dir, device,
 
         print(filename)
         midi = torch.load(filename + ".midiX")
+        if no_pedal:
+            midi = midi[:88]
+        midi = torch.nn.functional.relu(midi)
+        
         audio_target = torch.load (filename + ".audioX")
 
         # Add a batch dimension
@@ -145,6 +151,10 @@ def pyinfer_teacher_forcing(midi_files, model_filename, output_dir, device, use_
         
         print(filename)
         midi = torch.load(filename + ".midiX")
+        if no_pedal:
+            midi = midi[:88]
+        midi = torch.nn.functional.relu(midi)
+        
         audio_target = torch.load (filename + ".audioX")
 
         plt.cla()
@@ -165,6 +175,7 @@ def pyinfer_teacher_forcing(midi_files, model_filename, output_dir, device, use_
 
         print(filename)
         print(teacher_samples)
+
         audio = model.inference(midi, use_logistic_mix=use_logistic_mix,
                                 teacher_audio=audio_target[:, :teacher_samples])
         print(audio.size())
@@ -193,6 +204,7 @@ if __name__ == "__main__":
                         "default=256")
     parser.add_argument("--teacher_length", type=float, default=-1,
                         help="How long to input teacher audio for. default=-1 (full length)")
+    parser.add_argument("--no_pedal", action="store_true")
     
     args = parser.parse_args()
     device = torch.device(args.device)
@@ -201,6 +213,9 @@ if __name__ == "__main__":
         use_logistic_mix = True
         
     #torch.set_printoptions(profile="full")
+
+    global no_pedal
+    no_pedal = args.no_pedal
     
     if (args.infer_mode=='train'):
         train_mode_output(args.filelist_path, args.checkpoint_path, args.output_dir, device, use_logistic_mix, teacher_length=3)

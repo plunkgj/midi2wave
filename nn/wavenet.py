@@ -165,7 +165,8 @@ class QuantizedInputLayer(torch.nn.Module):
 class Wavenet(torch.nn.Module):
     def __init__(self, quantized_input, n_in_channels, n_layers, max_dilation,
                  n_residual_channels, n_skip_channels, n_skip_to_out_channels, n_out_channels,
-                 resblock_drop_prob, outFC_drop_prob, n_cond_channels, in_act_on, cond_act_on,
+                 resblock_drop_prob, outFC_drop_prob, in_act_on,
+                 n_cond_channels, cond_act_on,
                  upsamp_scale, upsample_by_copy, upsamp_conv_window):
         super(Wavenet, self).__init__()
 

@@ -4,6 +4,7 @@
 # as in "Fatcorized Music Modelling with the Maestro Dataset"
 
 import torch
+import torch.nn.functional as F
 from nn.wavenet import Wavenet
 
 class Wavenet_With_Condnet(torch.nn.Module):
@@ -22,11 +23,13 @@ class Wavenet_With_Condnet(torch.nn.Module):
         
         #Conditioning wavenet takes in null features
         null_features = torch.zeros(midi_features.size(0), 1, midi_features.size(2)).to(device)
-        cond_features = self.cond_wavenet.forward((null_features, midi_features), training)
-        assert(cond_features.size(2) == midi_features.size(2))
+        cond_features = self.cond_wavenet((null_features, midi_features), training)
 
-        model_input = (cond_features, forward_input)
-        return self.wavenet.forward(model_input, training)
+        q, q_bar = self.argmax_autoencode(cond_features)
+
+        y_preds = self.wavenet((q, forward_input), training)
+        
+        return (y_preds, q_bar)
 
     def export_weights(self):
         """
@@ -37,11 +40,27 @@ class Wavenet_With_Condnet(torch.nn.Module):
         model["cond_wavenet"] = self.cond_wavenet.export_weights()
         return model
 
+    def argmax_autoencode(self, condnet_output):
+        # argmax autoencoder (https://arxiv.org/abs/1806.10474)
+        q = F.relu(condnet_output)
+        q = q / (torch.sum(q, dim=1) + 1e-5) # divisive normalization w/ NaN safeguard if all qs negative
+        q_bar = torch.mean(q, dim=1)
+
+        # Sample a onehot from distribution with hard gumbel-softmax
+        # requires 2D input :(        
+        q = q.transpose(1, 2)
+        for b in range(condnet_output.size(0)):
+            q[b] = F.gumbel_softmax(q[b], hard=True) 
+        q = q.transpose(1, 2)
+
+        return q, q_bar
+    
     def inference(self, midi_features, **kwargs):
 
-        print(midi_features.size())
-        null_fetaures = torch.zeros(midi_3features.size(0), 1, midi_features.size(2)).to(midi_features.device)
+        batch_size = midi_features.size(0)
+        null_features = torch.zeros(batch_size, 1, midi_features.size(2)).to(midi_features.device)
         cond_features = self.cond_wavenet((null_features, midi_features))
-        print(cond_features.size())
         
-        return  self.wavenet.inference(cond_features, **kwargs)
+        q, _ = self.argmax_autoencode(cond_features)
+        
+        return self.wavenet.inference(q, **kwargs)

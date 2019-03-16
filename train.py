@@ -75,6 +75,36 @@ class CrossEntropyLoss(torch.nn.Module):
         inputs = inputs.view(-1, self.num_classes)
         return torch.nn.CrossEntropyLoss()(inputs, targets)
 
+class L2DiversityLoss(torch.nn.Module):
+    """
+    L2  diversity loss as detailed in section 3.2 of "The Challenge of 
+    Realistic Music Generation: Modelling Raw Audio at Scale".
+    https://arxiv.org/abs/1806.10474
+    
+    This term encourages the midi autoencoder distribution to be uniform across 
+    dimensions. This output distribution is quantized into a one-hot via argmax,
+    so making the output distribuion uniform ensures each one-hot vector has an 
+    equal chance of occuring. 
+    """
+    def __init__(self):
+        super(L2DiversityLoss, self).__init__()
+        
+    def forward(self, q_bar):
+        """
+        Notes on how this works:
+
+        q_bar is the continous autoencoder output distribution averaged across batch and time
+        Each q is normalized so sum(q)=1
+        Let k be the dimensionality of q
+        If q_bar is distributed uniformly, q_bar[i] = 1/k
+        k*q_bar[i] is encouraged to equal 1 using L2 loss
+        q_bar will be well-estimated, as there are 16,000 instances of q from every 
+            second of training data
+        """
+
+        k = q_bar.size(0)
+        loss = torch.sum((k*q_bar - 1) ** 2)
+        return loss
     
 def load_checkpoint(checkpoint_path, model, optimizer):
     assert os.path.isfile(checkpoint_path)
@@ -110,7 +140,7 @@ def save_checkpoint_cond(model, device, optimizer, learning_rate, iteration, fil
     
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
           iters_per_checkpoint, batch_size, seed, checkpoint_path,
-          use_cond_wavenet=False, use_logistic_mixtures=False, n_mixtures=3,
+          use_cond_wavenet=False, div_scale=0.005, use_logistic_mixtures=False, n_mixtures=3,
           audio_hz=16000, midi_hz=250):
 
     device = torch.device(device)
@@ -129,6 +159,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
     if use_cond_wavenet:
         model = Wavenet_With_Condnet(wavenet_config, cond_wavenet_config).to(device)
+        diversity_loss = L2DiversityLoss()
     else:
         model = Wavenet(**wavenet_config).to(device)
         
@@ -194,8 +225,15 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             #model.train()            
             y_preds = model((x, y))
-            
+
+            if use_cond_wavenet:
+                q_bar = y_preds[1]
+                y_preds = y_preds[0]
+                
             loss = criterion(y_preds, y_true)
+            if use_cond_wavenet:
+                loss = loss + (div_scale * diversity_loss(q_bar))
+            
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
@@ -207,7 +245,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             
             loss_sum += reduced_loss
             loss_idx += 1
-            if (iteration % 20 == 0):
+            if (iteration % 100 == 0):
                 print("floating avg: " + str(loss_sum/loss_idx))
                 loss_writer.writerow({"iteration": str(i),
                                       "loss": str(reduced_loss)})
