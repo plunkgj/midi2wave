@@ -140,7 +140,8 @@ def save_checkpoint_cond(model, device, optimizer, learning_rate, iteration, fil
     
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
           iters_per_checkpoint, batch_size, seed, checkpoint_path,
-          use_cond_wavenet=False, div_scale=0.005, use_logistic_mixtures=False, n_mixtures=3,
+          use_scheduled_sampler=False, use_cond_wavenet=False, div_scale=0.005,
+          use_logistic_mixtures=False, n_mixtures=3,
           audio_hz=16000, midi_hz=250):
 
     device = torch.device(device)
@@ -166,7 +167,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     if num_gpus > 1:
         model = apply_gradient_allreduce(model)
 
-    scheduled_sampler = ScheduledSamplerWithPatience(model, sampler, **scheduled_sampler_config)
+    if use_scheduled_sampling:
+        scheduled_sampler = ScheduledSamplerWithPatience(model, sampler, **scheduled_sampler_config)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.0004)
 
@@ -203,9 +205,13 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     loss_sum = 0
 
     # write loss to csv file
-    loss_writer = DictWriter(open("checkpoints/train.csv", 'w', newline=''),
-                             fieldnames=['iteration', "loss"])
+    loss_writer = DictWriter(open("checkpoints_noCondNet/train.csv", 'w', newline=''),
+                             fieldnames=['iteration', 'loss'])
     loss_writer.writeheader()
+
+    signal_writer = DictWriter(open("checkpoints_noCondNet/signal.csv", "w", newline=''),
+                               fieldnames=['iteration', 'cosim', 'p-dist', 'forwardMagnitude', 'midiMagnitude'])
+    signal_writer.writeheader()
     
     model.train()    
     # ================ MAIN TRAINING LOOP! ===================
@@ -220,32 +226,39 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             y = as_variable(y, device)
             y_true = y.clone()
 
-            #model.eval()
-            y = scheduled_sampler(x, y)                
+            if use_scheduled_sampling:
+                y = scheduled_sampler(x, y)                
 
-            #model.train()            
-            y_preds = model((x, y))
-
+            # FLAG delete 2nd value after debugging
+            y_preds, act_data = model((x, y))
+            
+            signalData = debug.AnalyzeMidiSignal(act_data, signal_writer)
+            
             if use_cond_wavenet:
                 q_bar = y_preds[1]
                 y_preds = y_preds[0]
                 
             loss = criterion(y_preds, y_true)
             if use_cond_wavenet:
-                loss = loss + (div_scale * diversity_loss(q_bar))
-            
+                div_loss = diversity_loss(q_bar)
+                loss = loss + (div_scale * div_loss)
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
                 reduced_loss = loss.data.item()
             loss.backward()
             optimizer.step()
-            scheduled_sampler.update(reduced_loss)            
-            print("loss:        {}:\t{:.9f}".format(iteration, reduced_loss))
-            
+            print("total loss:     {}:\t{:.9f}".format(iteration, reduced_loss))
+            if use_cond_wavenet:
+                print("    diversity loss: {:.9f}".format(div_loss))
+
+            if use_scheduled_sampling:
+                scheduled_sampler.update(reduced_loss)            
+
+            # record running average of loss
             loss_sum += reduced_loss
             loss_idx += 1
-            if (iteration % 100 == 0):
+            if (iteration % 20 == 0):
                 print("floating avg: " + str(loss_sum/loss_idx))
                 loss_writer.writerow({"iteration": str(i),
                                       "loss": str(reduced_loss)})

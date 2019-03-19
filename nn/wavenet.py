@@ -166,7 +166,7 @@ class Wavenet(torch.nn.Module):
     def __init__(self, quantized_input, n_in_channels, n_layers, max_dilation,
                  n_residual_channels, n_skip_channels, n_skip_to_out_channels, n_out_channels,
                  resblock_drop_prob, outFC_drop_prob, in_act_on,
-                 n_cond_channels, cond_act_on,
+                 n_cond_channels, cond_act_on, cond_in_transform_on,
                  upsamp_scale, upsample_by_copy, upsamp_conv_window):
         super(Wavenet, self).__init__()
 
@@ -240,12 +240,20 @@ class Wavenet(torch.nn.Module):
         if cond_input.size(2) > forward_input.size(-1):
             cond_input = cond_input[:, :, :forward_input.size(-1)]
         cond_input = self.cond_layers(cond_input)      
-        cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))        
+        cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
 
+        # FLAG for saving layer data
+        cosine_similarity = torch.zeros(cond_input.size())
+        in_acts_stacked = torch.zeros(cond_input.size())
+        
         for i in range(self.n_layers):
             if training:
                 forward_input = self.resblock_dropout(forward_input)
             in_act = self.dilate_layers[i](forward_input)
+
+            # capture midi and audio signals for analysis
+            in_acts_stacked[:, i, :, :] = in_acts.clone()
+
             in_act = in_act + cond_input[:,i,:,:]            
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
@@ -260,7 +268,7 @@ class Wavenet(torch.nn.Module):
                 output = self.skip_layers[i](acts)
             else:
                 output = self.skip_layers[i](acts) + output
-
+            
         if training:
             output = self.outFC_dropout(output)
         output = torch.nn.functional.relu(output, True)
@@ -279,7 +287,7 @@ class Wavenet(torch.nn.Module):
         first = last * 0.0
         output = torch.cat((first, output), dim=2)
 
-        return output
+        return output, (in_acts_stacked, cond_input)
 
 
     def infer_step(self, cond_input, forward_input):

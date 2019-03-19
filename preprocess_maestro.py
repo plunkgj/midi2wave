@@ -1,33 +1,54 @@
-# Gary Plunkett
-# January 2018
-# Script to preprocess maestro audio and midi files for input to
-# the nv-wavenet. Expects mono audio
+"""
+Gary Plunkett, January 2018
+Script to preprocess maestro audio and midi files for wavenet training.
+Expects audio to have been resampled and mono-ized by resample_audio.py
+
+This script requires two arguments:
+
+-c "config file"
+-d "data_usage", options are "train" and "test"
+
+
+The config file options explained:
+
+maestro_dir:        Location of the root maetsro folder
+split:              "train", "test", or "validate". Only preprocesses one at a time
+out_dir:            Directory to save matrix data to
+
+audio_hz:            16000 by default
+midi_hz:             250 by default
+mu_law_encode:       If true, audio is saved mu-encoded. Default is true
+mu_quantization:     Default is 256
+test_segment_length: Length of data to save in seconds. Only aplicable when saving test data, not train.
+only_audio:          Only save audio data. Default false
+only_midi:           Only save midi data. Default false
+no_output_csv:       Dont write an output csv. By default if one exists it is overwrittenn. Default false
+seperate_audio_dir:  If resampled audio saved somehwere other than the maestro dir, specify that here. Default None
+
+"""
 
 import argparse
+import json
 import csv
 import torch
 import torch.utils.data
 import numpy as np
-import librosa
 import pretty_midi
 import random
 import utils
 import scipy as sp
-
+from scipy.io.wavfile import read, write
 import matplotlib
 # Set non-graphical backend for saving plots
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from scipy.io.wavfile import read, write
 
-MAKE_TEST = True
-
-
-def Midi2Tensor(filename, midi_hz, offset_vel=0):
+def Midi2Tensor(filename, midi_hz):
     """
     Return midi onsets as a sparse numpy matrix.
-    Can record offsets by specifying a nonzero offset value 
+    Resamples midi to the specified Hz by decimation
+    Onset value is normalized note velociity
     """
     pm = pretty_midi.PrettyMIDI(filename)
 
@@ -39,29 +60,19 @@ def Midi2Tensor(filename, midi_hz, offset_vel=0):
     tick = []
     pitch = []
     
-    #Make a onehot vector for each notes' onset and offset
-    for note in notes:
-        
+    # make a onehot vector for each notes' on set and offset
+    for note in notes:        
         tick.append( int(np.floor(note.start * midi_hz)) )
         assert(note.pitch>20 and note.pitch<110)
         pitch.append(note.pitch - 21)
         vel.append(note.velocity / 127)
-
-        tick.append( int(np.floor(note.end * midi_hz)) )
-        pitch.append(note.pitch - 21)
-        # Greater than 0 will mirror onset vel
-        if (offset_vel>0):
-            vel.append(-note.velocity/127)
-        else:
-            vel.append(offset_vel)
             
-    #Make a onehot vector for each pedal change
+    # make a onehot vector for each pedal change
     for ped in pedals:
         assert(ped.number==64)
         tick.append( int(np.floor(ped.time * midi_hz)) )
         pitch.append(88)
         vel.append(ped.value / 127)
-
 
     midiX = sp.sparse.csc_matrix((vel, (pitch, tick)), shape=(89, num_ticks+1), dtype="float32")
     return midiX
@@ -78,124 +89,88 @@ def Audio2Vec(filename, hz, mu_law_encode, mu_quantization):
     return audio
 
 
-def MakeTestData(dataset_path, output_dir, metadata, test_segment_length, audio_hz, midi_hz, offset_vel):
+def SaveTestData(audioX, midiX, fileNum, output_dir, test_segment_length, audio_hz, midi_hz, mu_law_encode=True):
+    """
+    Save torch tensors for inference.py
+    A random segment in the piece will be chosen. The length is specified by test_segment_length
 
-    filelist = open(output_dir + "/filenames.txt", 'w')    
+    This also plots a visualization of the midi roll, and the ground truth audio segment
+    """
+    
     fig, ax = plt.subplots()
 
-    for i, piece in enumerate(metadata):
-
-        print(str(i) + ", " + piece["audio_filename"] )
-
-        filename = output_dir + "/" + str(i)
-        filelist.write(filename + "\n")
+    filename = output_dir + "/" + str(fileNum)
         
-        # save midi tensor
-        midi = Midi2Tensor(dataset_path + piece["midi_filename"], midi_hz, offset_vel)
+    # save midi tensor
+    if midiX is not None:
         segment_samples = int(np.floor(midi_hz * test_segment_length))
-        starting_pos = random.randint(0, midi.shape[1] - segment_samples)
-        midi = midi[:, starting_pos:(starting_pos + segment_samples)]
-        midi = midi.todense()
-        midi = torch.from_numpy(midi)
-        torch.save(midi, filename + ".midiX")
+        starting_pos = random.randint(0, midiX.shape[1] - segment_samples)
+        midiX = midiX[:, starting_pos:(starting_pos + segment_samples)]
+        midiX = midiX.todense()
+        torch.save(torch.from_numpy(midiX), filename + ".midiX")
 
         # plot midi roll
         plt.cla()
-        ax.spy(midi[:89, :], markersize=3, aspect="auto", origin='lower')
+        ax.spy(midiX[:89, :], markersize=3, aspect="auto", origin='lower')
         plt.savefig(filename + ".png")
 
-        # save ground truth audio
-        _, audio = read(dataset_path + piece["audio_filename"][:-4] + "_" + str(audio_hz) + ".wav")
-        audio_seg_samps = int(audio_hz * test_segment_length)
+    # save ground truth audio
+    if audioX is not None:
+        segment_samples = int(audio_hz * test_segment_length)
         audio_start_pos = int(starting_pos * (audio_hz / midi_hz))
-        audio = audio[audio_start_pos : (audio_start_pos + audio_seg_samps)]
-        audioX = utils.mu_law_encode_numpy(audio) # save for tensor
-        audio = utils.mu_law_decode_numpy(audioX)
-        audio = utils.MAX_WAV_VALUE * audio
-        wavdata = audio.astype('int16')
-        write(filename + "_target.wav", 16000, wavdata)
-        torch.save(torch.from_numpy(audioX), filename + ".audioX")
+        audioX = audioX[audio_start_pos : (audio_start_pos + segment_samples)]
+        torch.save(torch.from_numpy(audioX), filename + ".audioX")        
 
-    filelist.close()
-        
-#~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%~%
+        # save ground truth audio
+        if mu_law_encode:
+            raw_audio = utils.mu_law_decode_numpy(audioX)
+        else:
+            raw_audio = audioX.numpy()
+        raw_audio = utils.MAX_WAV_VALUE * raw_audio
+        wavdata = raw_audio.astype('int16')
+        write(filename + "_groundTruth.wav", 16000, wavdata)
 
-if __name__ == "__main__":
-
-    parser=argparse.ArgumentParser()
-    parser.add_argument('-m', '--maestro_dir', type=str,
-                        help='Location of meastro-v1.0.0 directory.')
-    parser.add_argument('-s', '--split', type=str,
-                        choices=['train', 'validate', 'test'],
-                        help='Which training split to preprocess.')    
-    parser.add_argument('-a', '--audio_dir', type=str,
-                        default=None,
-                        help='Location of audio directory. Audio should be mono'
-                        ' and have ["_" + str(hz)] appended to filename. '
-                        'Default is same as maestro_dir.')
-    parser.add_argument('-o', '--out_dir', type=str,
-                        default="./processed_data/",
-                        help='Default is ./processed_data/' )
-    parser.add_argument('--audio_hz', type=int,
-                        default=16000,
-                        help='Sample rate of audio files being read.'
-                        'Default is 16000')
-    parser.add_argument('--midi_hz', type=int,
-                        default=250,
-                        help='Sample rate to convert midi files to. Default is 250')
-    parser.add_argument('-v', '--offset_vel', type=float,
-                        default=-1.0,
-                        help='Normalized velocity value indicating a note_off in '
-                         'midi vectors. Suggested value range is [-1, 0), but any'
-                         ' float is possible. offset_val>0 means mirror onset_vel.')
-    parser.add_argument('--mu_law_encode', type=bool, default=True,
-                        help='Whether to save audio using mu law encoding.'
-                        'Default is True')
-    parser.add_argument('--mu_quantization', type=int, default=256,
-                        help='Number of possible values for mu-law qunatization. '
-                        'Default is 256')
-    parser.add_argument('--only_audio', action='store_true')
-    parser.add_argument('--only_midi', action='store_true')
-    parser.add_argument('--no_csv', action='store_true',
-                        help='Dont overwrite csv. Useful if its already been created.')
-    args = parser.parse_args()
     
-    if (args.only_audio) and (args.only_midi):
-        print("Cannot specify both --only_midi and --only_audio. Exiting script")
+def PreprocessMaestro(train_or_test, maestro_dir, split, out_dir,
+                       audio_hz=16000, midi_hz=250,
+                       mu_law_encode=True, mu_quantization=256, test_segment_length=4,
+                       only_audio=False, only_midi=False, no_output_csv=False, separate_audio_dir=None):
+    """
+    Save audio and midi tensors in output dir
+    """
+    
+    if (only_audio) and (only_midi):
+        print("Cannot set true both \"only_midi\" and \"only_audio\". Exiting.")
         exit()
 
-    audio_dir = args.audio_dir
-    if (audio_dir==None):
-        audio_dir = args.maestro_dir
+    if separate_audio_dir is None:
+        audio_dir = maestro_dir
+    else:
+        audio_dir = separate_audio_dir
         
-    #Read metadata
-    metadata = csv.DictReader(open(args.maestro_dir + '/maestro-v1.0.0.csv'))
+    # Read maestro metadata
+    metadata = csv.DictReader(open(maestro_dir + '/maestro-v1.0.0.csv'))
     test = []
     validate = []
     train = []
-    for data in metadata:
-        if (data['split']=='train'):
-            train.append(data)
-        elif (data['split']=='validation'):
-            validate.append(data)
-        elif (data['split']=='test'):
-            test.append(data)
+    for file in metadata:
+        if (file['split']=='train'):
+            train.append(file)
+        elif (file['split']=='validation'):
+            validate.append(file)
+        elif (file['split']=='test'):
+            test.append(file)
 
-    split_name=args.split
-    if (args.split=="train"):
+    if (split=="train"):
         split_data=train
-    elif (args.split=="validate"):
+    elif (split=="validate"):
         split_data=validate
-    elif (args.split=="test"):
+    elif (split=="test"):
         split_data=test
 
-        
-    if (MAKE_TEST):
-        MakeTestData(args.maestro_dir, args.out_dir, validate, 1, args.audio_hz, args.midi_hz, args.offset_vel)
-        exit()
-        
-    if not args.no_csv:
-        csvwriter = csv.DictWriter(open(args.out_dir + "/filenames.csv", 'w', newline=''),
+    # Write file information to the output directory, essential for dataloader
+    if not no_output_csv:
+        csvwriter = csv.DictWriter(open(out_dir + "/filenames.csv", 'w', newline=''),
                                    fieldnames=["index",
                                                "audio_samples",
                                                "midi_samples",
@@ -203,43 +178,66 @@ if __name__ == "__main__":
                                                "midi_filename"])
         csvwriter.writeheader()
 
+    # start message
     t_str = "midi and audio"
-    if args.only_midi:    t_str=t_str[:4]
-    elif args.only_audio: t_str=t_str[-5:]
-    print("Making " + t_str + " tensors for " + str(len(split_data)) + " files")
-        
-    #Save midi and audio data as tensors
+    if only_midi:
+        t_str=t_str[:4]
+    elif only_audio:
+        t_str=t_str[-5:]
+    print("Making " + t_str + " tensors for " + train_or_test  + ", " + str(len(split_data)) + " files")
+
+    # save audio as numpy array, and midi as sparse numpy matrix
     for i, piece in enumerate(split_data):
 
         print("file" + str(i), end='\r', flush=True)
-        
-        audio_suffix =  "_" + str(args.audio_hz) + ".wav"
+
+        # audio downsampled by resample_audio.py will have "_Hz" appended to filename
+        audio_suffix =  "_" + str(audio_hz) + ".wav"
         audio_filename = audio_dir + "/" + piece["audio_filename"][:-4] + audio_suffix
-        midi_filename = args.maestro_dir + "/" + piece["midi_filename"]        
 
-        #Save audio array
-        if not args.only_midi:
-            audioX = Audio2Vec(audio_filename,
-                               args.audio_hz,
-                               args.mu_law_encode,
-                               args.mu_quantization)
+        midi_filename = maestro_dir + "/" + piece["midi_filename"]        
 
-            np.save(args.out_dir + str(i), audioX)
+        # Save audio array
+        audioX = None
+        if not only_midi:
+            audioX = Audio2Vec(audio_filename, audio_hz,
+                               mu_law_encode, mu_quantization)
+            if train_or_test=="train": 
+                np.save(out_dir + str(i), audioX)
 
-        #Save sparse midi tensor
-        if not args.only_audio:
-            midiX = Midi2Tensor(midi_filename,
-                                args.midi_hz,
-                                args.offset_vel)
+        # Save sparse midi tensor
+        midiX = None
+        if not only_audio:
+            midiX = Midi2Tensor(midi_filename, midi_hz)
+            if train_or_test=="train":
+                np.savez(out_dir + str(i),
+                         data=midiX.data,
+                         indices=midiX.indices,
+                         indptr=midiX.indptr)
 
-            np.savez(args.out_dir + str(i),
-                     data=midiX.data,
-                     indices=midiX.indices,
-                     indptr=midiX.indptr)
-            
-        if not args.no_csv:
+        if train_or_test=="test":
+            SaveTestData(audioX, midiX, i, out_dir, test_segment_length, audio_hz, midi_hz, mu_law_encode)
+                
+        if not no_output_csv:
             csvwriter.writerow({"index": str(i),
                                 "audio_samples": audioX.shape[0],
                                 "midi_samples": midiX.shape[1],
                                 "audio_filename": piece["audio_filename"],
                                 "midi_filename": piece["midi_filename"] })
+
+
+if __name__ == "__main__":
+
+    parser=argparse.ArgumentParser()
+    parser.add_argument('-c', '--config', type=str, help="Location of configuration file")
+    parser.add_argument('-d', '--data_usage', type=str, choices=["train", "test"],
+                        help="What is this data going to be used for? Train and test data saved differently.")
+    
+    args = parser.parse_args()
+
+    # Parse config file
+    with (open(args.config)) as f:
+        data = f.read()
+    config = json.loads(data)["preprocess_config"]
+
+    PreprocessMaestro(args.data_usage, **config)
