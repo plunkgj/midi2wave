@@ -44,12 +44,12 @@ from scipy.io.wavfile import write
 
 import utils
 from utils import as_variable, mu_law_encode
-from midi2multihot import Midi2SampMultihot
+from maestro_dataloader import MaestroDataloader
 from scheduled_sampling  import ScheduledSamplerWithPatience
 import debug
 from nn.wavenet import Wavenet
 from nn import discretized_mix_logistics as DML
-from nn.wavenet_with_condnet import Wavenet_With_Condnet
+from nn.wavenet_autoencoder import WavenetAutoencoder
 
 from distributed import init_distributed, apply_gradient_allreduce, reduce_tensor
 from torch.utils.data.distributed import DistributedSampler
@@ -75,6 +75,7 @@ class CrossEntropyLoss(torch.nn.Module):
         inputs = inputs.view(-1, self.num_classes)
         return torch.nn.CrossEntropyLoss()(inputs, targets)
 
+    
 class L2DiversityLoss(torch.nn.Module):
     """
     L2  diversity loss as detailed in section 3.2 of "The Challenge of 
@@ -127,10 +128,10 @@ def save_checkpoint(model, device, optimizer, learning_rate, iteration, filepath
                 'optimizer': optimizer.state_dict(),
                 'learning_rate': learning_rate}, filepath)
 
-def save_checkpoint_cond(model, device, optimizer, learning_rate, iteration, filepath):
+def save_checkpoint_autoencoder(model, device, use_VAE, optimizer, learning_rate, iteration, filepath):
     print("Saving model and optimizer state at iteration {} to {}".format(
           iteration, filepath))
-    model_for_saving = Wavenet_With_Condnet(wavenet_config, cond_wavenet_config).to(device)
+    model_for_saving = WavenetAutoencoder(wavenet_config, cond_wavenet_config, use_VAE).to(device)
     model_for_saving.load_state_dict(model.state_dict())
     torch.save({'model': model_for_saving,
                 'iteration': iteration,
@@ -140,7 +141,8 @@ def save_checkpoint_cond(model, device, optimizer, learning_rate, iteration, fil
     
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
           iters_per_checkpoint, batch_size, seed, checkpoint_path,
-          use_scheduled_sampler=False, use_cond_wavenet=False, div_scale=0.005,
+          use_scheduled_sampling=False,
+          use_wavenet_autoencoder=False, use_variational_autoencoder=False, div_scale=0.005,
           use_logistic_mixtures=False, n_mixtures=3,
           audio_hz=16000, midi_hz=250):
 
@@ -158,9 +160,10 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
         sampler = utils.CategoricalSampler()
         criterion = CrossEntropyLoss()
 
-    if use_cond_wavenet:
-        model = Wavenet_With_Condnet(wavenet_config, cond_wavenet_config).to(device)
-        diversity_loss = L2DiversityLoss()
+    if use_wavenet_autoencoder:
+        model = WavenetAutoencoder(wavenet_config, cond_wavenet_config, use_variational_autoencoder).to(device)
+        if use_variational_autoencoder:
+            diversity_loss = L2DiversityLoss()
     else:
         model = Wavenet(**wavenet_config).to(device)
         
@@ -179,7 +182,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
         iteration += 1
 
     # Dataloader
-    trainset = Midi2SampMultihot(**data_config)
+    trainset = MaestroDataloader(**data_config)
     if num_gpus > 1:
         train_sampler = DistributedSampler(trainset)
     else:
@@ -204,12 +207,15 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     loss_idx = 0
     loss_sum = 0
 
+    print(output_directory)
+    
     # write loss to csv file
-    loss_writer = DictWriter(open("checkpoints_noCondNet/train.csv", 'w', newline=''),
+    # FLAG change these to write to the output directory.
+    loss_writer = DictWriter(open(output_directory + "/train.csv", 'w', newline=''),
                              fieldnames=['iteration', 'loss'])
     loss_writer.writeheader()
 
-    signal_writer = DictWriter(open("checkpoints_noCondNet/signal.csv", "w", newline=''),
+    signal_writer = DictWriter(open(output_directory + "/signal.csv", "w", newline=''),
                                fieldnames=['iteration', 'cosim', 'p-dist', 'forwardMagnitude', 'midiMagnitude'])
     signal_writer.writeheader()
     
@@ -229,17 +235,23 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             if use_scheduled_sampling:
                 y = scheduled_sampler(x, y)                
 
-            # FLAG delete 2nd value after debugging
-            y_preds, act_data = model((x, y))
+            y_preds, resblock_acts = model((x, y))
+
+            # Record midi and res block signals at point of combination
+            # This step will be removed once I figure out how to prevent posterior collapse
+            signalData = debug.AnalyzeMidiSignal(resblock_acts, signal_writer)
+            signal_writer.writerow({"iteration": str(i),
+                                    "cosim": str(signalData[0]),
+                                    "p-dist": str(signalData[1]),
+                                    "forwardMagnitude": str(signalData[2]),
+                                    "midiMagnitude": str(signalData[3])})
             
-            signalData = debug.AnalyzeMidiSignal(act_data, signal_writer)
-            
-            if use_cond_wavenet:
+            if use_wavenet_autoencoder:
                 q_bar = y_preds[1]
                 y_preds = y_preds[0]
                 
             loss = criterion(y_preds, y_true)
-            if use_cond_wavenet:
+            if use_variational_autoencoder:
                 div_loss = diversity_loss(q_bar)
                 loss = loss + (div_scale * div_loss)
             if num_gpus > 1:
@@ -249,7 +261,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             loss.backward()
             optimizer.step()
             print("total loss:     {}:\t{:.9f}".format(iteration, reduced_loss))
-            if use_cond_wavenet:
+            if use_variational_autoencoder:
                 print("    diversity loss: {:.9f}".format(div_loss))
 
             if use_scheduled_sampling:
@@ -269,8 +281,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             if (iteration % iters_per_checkpoint == 0):
                 if rank == 0:
                     checkpoint_path = "{}/wavenet_{}".format(output_directory, iteration)
-                    if use_cond_wavenet:
-                        save_checkpoint_cond(model, device, optimizer, learning_rate,
+                    if use_wavenet_autoencoder:
+                        save_checkpoint_autoencoder(model, device, use_variational_autoencoder, optimizer, learning_rate,
                                              iteration, checkpoint_path)
                     else:
                         save_checkpoint(model, device, optimizer, learning_rate, iteration,

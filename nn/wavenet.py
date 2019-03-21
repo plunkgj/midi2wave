@@ -252,7 +252,7 @@ class Wavenet(torch.nn.Module):
             in_act = self.dilate_layers[i](forward_input)
 
             # capture midi and audio signals for analysis
-            in_acts_stacked[:, i, :, :] = in_acts.clone()
+            in_acts_stacked[:, i, :, :] = in_act.clone()
 
             in_act = in_act + cond_input[:,i,:,:]            
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])

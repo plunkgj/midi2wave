@@ -18,9 +18,9 @@ import torch.utils.data
 
 import utils
 
-class Midi2SampMultihot(torch.utils.data.Dataset):
+class MaestroDataloader(torch.utils.data.Dataset):
 
-    def __init__(self, dataset_path, segment_length, midi_hz, audio_hz, only_onsets, midi_channels, no_pedal, print_file_nums=False, epoch_length=None):
+    def __init__(self, dataset_path, segment_length, midi_hz, audio_hz, midi_channels, no_pedal, print_file_nums=False, epoch_length=None):
         
         self.dataset_path = dataset_path
         self.segment_length = segment_length
@@ -50,7 +50,6 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
         self.print_file_nums = print_file_nums
 
         self.midi_channels=midi_channels
-        self.only_onsets = only_onsets
         self.audio_hz = audio_hz
         self.midi_hz = midi_hz
         self.no_pedal = no_pedal
@@ -77,8 +76,6 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
 
             midi = midi[:, midi_start_pos:(midi_start_pos + self.midi_segment_length)]
             midi = midi.todense()
-            if self.only_onsets:
-                np.maximum(midi, 0, midi)
 
             #if no midi onsets try again (disregard pedal input)
             if midi[0:88, :].nonzero()[0].shape[0] == 0: 
@@ -88,7 +85,7 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
             midi = midi[:88]
         audio_start_pos = int(midi_start_pos * (self.audio_hz / self.midi_hz))
         audio = np.load(self.dataset_path + self.file_names[file_num] + ".npy", mmap_mode='r')
-        audio = self.slice_audio(audio, audio_start_pos, midi)
+        audio = self.silence_before_first_onset(audio, audio_start_pos, midi)
         
         midiX = torch.from_numpy(midi)
         audioX = torch.from_numpy(audio)
@@ -96,7 +93,7 @@ class Midi2SampMultihot(torch.utils.data.Dataset):
         return (midiX, audioX)
 
 
-    def slice_audio(self, audio, audio_start_pos, midi):
+    def silence_before_first_onset(self, audio, audio_start_pos, midi):
         """
         Set audio signal to 0 until first midi onset
         """

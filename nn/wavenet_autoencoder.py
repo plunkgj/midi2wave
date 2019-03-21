@@ -7,14 +7,15 @@ import torch
 import torch.nn.functional as F
 from nn.wavenet import Wavenet
 
-class Wavenet_With_Condnet(torch.nn.Module):
-    def __init__(self, wavenet_params, condwavenet_params):
+class WavenetAutoencoder(torch.nn.Module):
+    def __init__(self, wavenet_params, condwavenet_params, use_VAE):
 
-        super(Wavenet_With_Condnet, self).__init__()
+        super(WavenetAutoencoder, self).__init__()
         
         self.cond_wavenet = Wavenet(**condwavenet_params)
         self.wavenet = Wavenet(**wavenet_params)
-
+        self.use_VAE = use_VAE
+        
     def forward(self, forward_input, training=True):
 
         midi_features = forward_input[0]
@@ -23,13 +24,15 @@ class Wavenet_With_Condnet(torch.nn.Module):
         
         #Conditioning wavenet takes in null features
         null_features = torch.zeros(midi_features.size(0), 1, midi_features.size(2)).to(device)
-        cond_features = self.cond_wavenet((null_features, midi_features), training)
+        cond_features, _ = self.cond_wavenet((null_features, midi_features), training)
 
-        q, q_bar = self.argmax_autoencode(cond_features)
+        q_bar=0
+        if self.use_VAE:
+            cond_features, q_bar = self.argmax_autoencode(cond_features)
 
-        y_preds = self.wavenet((q, forward_input), training)
+        y_preds, act_data = self.wavenet((cond_features, forward_input), training)
         
-        return (y_preds, q_bar)
+        return (y_preds, q_bar), act_data
 
     def export_weights(self):
         """
@@ -43,11 +46,11 @@ class Wavenet_With_Condnet(torch.nn.Module):
     def argmax_autoencode(self, condnet_output):
         # argmax autoencoder (https://arxiv.org/abs/1806.10474)
         q = F.relu(condnet_output)
-        q = q / (torch.sum(q, dim=1) + 1e-5) # divisive normalization w/ NaN safeguard if all qs negative
-        q_bar = torch.mean(q, dim=1)
-
+        q = q / (torch.sum(q, dim=1) + 1e-5)             # divisive normalization w/ NaN safeguard if all qs negative
+        q_bar = torch.mean(torch.mean(q, dim=0), dim=1)  # mean over batch and time dimensions
+        
         # Sample a onehot from distribution with hard gumbel-softmax
-        # requires 2D input :(        
+        # requires 2D input so process'd one batch at a time      
         q = q.transpose(1, 2)
         for b in range(condnet_output.size(0)):
             q[b] = F.gumbel_softmax(q[b], hard=True) 

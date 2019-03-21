@@ -134,3 +134,5 @@ class UniformSampler(torch.nn.Module):
         low = torch.full(size, floor)
         high = torch.full(size, 1-floor)
         return torch.distributions.uniform.Uniform(low, high).sample()
+ 
+    

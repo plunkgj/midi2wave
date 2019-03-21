@@ -4,7 +4,7 @@ Simple debugging functions for midi wavenet
 """
 
 import torch
-
+import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
@@ -47,5 +47,22 @@ def plot_probs(probs):
 def tprobe(X, name):
     print ()
     print("probing " + name)
-    print("X max: " + str(torch.max(X)))
-    print("X min: " + str(torch.min(X)))
+    print(name + " max: " + str(torch.max(X)))
+    print(name + " min: " + str(torch.min(X)))
+    print(name + " mean: " + str(torch.mean(x)))
+    
+
+def AnalyzeMidiSignal(act_data, signal_writer):
+    in_acts = act_data[0].detach().cpu()
+    cond_acts = act_data[1].detach().cpu()
+
+    cosim = torch.mean(F.cosine_similarity(in_acts, cond_acts, dim=2))
+    pairwise_distance = torch.mean(F.pairwise_distance(in_acts, cond_acts))
+    in_act_mag = torch.mean(torch.pow(torch.sum(torch.pow(in_acts, 2), dim=2), 0.5))
+    cond_act_mag = torch.mean(torch.pow(torch.sum(torch.pow(cond_acts, 2), dim=2), 0.5))
+
+    av_cond_act = torch.mean(cond_acts, dim=3, keepdim=True)
+    cond_act_dev = torch.mean(F.cosine_similarity(cond_acts, av_cond_act))
+
+    return (cosim, pairwise_distance, in_act_mag, cond_act_mag)
+    
