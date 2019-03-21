@@ -142,7 +142,7 @@ def save_checkpoint_autoencoder(model, device, use_VAE, optimizer, learning_rate
 def train(num_gpus, rank, group_name, device, output_directory, epochs, learning_rate,
           iters_per_checkpoint, batch_size, seed, checkpoint_path,
           use_scheduled_sampling=False,
-          use_wavenet_autoencoder=False, use_variational_autoencoder=False, div_scale=0.005,
+          use_wavenet_autoencoder=False, use_variational_autoencoder=False, diversity_scale=0.005,
           use_logistic_mixtures=False, n_mixtures=3,
           audio_hz=16000, midi_hz=250):
 
@@ -253,7 +253,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             loss = criterion(y_preds, y_true)
             if use_variational_autoencoder:
                 div_loss = diversity_loss(q_bar)
-                loss = loss + (div_scale * div_loss)
+                loss = loss + (diversity_scale * div_loss)
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:

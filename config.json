@@ -1,6 +1,6 @@
 {
     "train_config": {
-	"device": "cuda:1",
+	"device": "cuda",
         "output_directory": "./checkpoints/",
         "epochs": 100000,
         "learning_rate": 1e-3,
@@ -11,7 +11,7 @@
 	"use_scheduled_sampling": false,
 	"use_wavenet_autoencoder": true,
 	"use_variational_autoencoder": false,
-	"div_scale": 0.01,
+	"diversity_scale": 0.01,
 	"use_logistic_mixtures": true,
 	"n_mixtures": 10
     },
