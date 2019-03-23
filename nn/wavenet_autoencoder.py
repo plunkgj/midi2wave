@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from nn.wavenet import Wavenet
 
+import time
+
 class WavenetAutoencoder(torch.nn.Module):
     def __init__(self, wavenet_params, condwavenet_params, use_VAE):
 
@@ -62,8 +64,9 @@ class WavenetAutoencoder(torch.nn.Module):
 
         batch_size = midi_features.size(0)
         null_features = torch.zeros(batch_size, 1, midi_features.size(2)).to(midi_features.device)
-        cond_features = self.cond_wavenet((null_features, midi_features))
-        
-        q, _ = self.argmax_autoencode(cond_features)
-        
-        return self.wavenet.inference(q, **kwargs)
+        # FLAG get rid of _ after I stop outputting resblock signal
+        cond_features, _ = self.cond_wavenet((null_features, midi_features))
+        if self.use_VAE:
+            cond_features, _ = self.argmax_autoencode(cond_features)
+            
+        return self.wavenet.inference(cond_features, **kwargs)

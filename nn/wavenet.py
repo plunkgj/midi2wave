@@ -327,15 +327,17 @@ class Wavenet(torch.nn.Module):
         return output
 
     
-    def inference(self, cond_features, mu_quantization=256, use_logistic_mix = False,
-                  teacher_audio=None, randomize_input=False, device="cuda",
-                  rand_sample_chance=0., length=0, batch_size=0, cond_channels=0):
+    def inference(self, cond_features, use_logistic_mix = False,
+                  teacher_audio=None, mu_quantization=256,
+                  randomize_input=False, rand_sample_chance=0.,
+                  length=0, batch_size=0, cond_channels=0, device="cuda"): 
         """
         Generates audio samples equivalent to the length of upsampled cond features
-        - If no features provided, generates number of samples equal to length parameter
         - Will use teacher audio as forward input, if provided
         - If teacher_audio_length < features_length, switches forward input to inference 
               samples when teacher samples exhasted.
+        - If cond_features=None, generates unconditional output. Last four params 
+              (length, batch_size, cond_channels, device) control unconditional output.
         """
 
         assert((cond_features is not None) or (length > 0))
@@ -379,6 +381,7 @@ class Wavenet(torch.nn.Module):
         # inference loop:
         ##################
         start_time = time.time()
+        print("Inference progress:")
         for s in range(length-1):
 
             # print progress every 100 samples
@@ -387,8 +390,7 @@ class Wavenet(torch.nn.Module):
 
             cond_sample = cond_features[:, :, :, s]
 
-            # FLAG is random sampling even useful anymore?
-            # use a random sample?
+            # flip biased coin to see if raandom sample used
             if randomize_input and (random.uniform < rand_sample_chance):
                     forward_sample = torch.randint_like(forward_sample,
                                                         low=0, high=mu_quantization)
@@ -411,8 +413,6 @@ class Wavenet(torch.nn.Module):
 
         if not use_logistic_mix:
             probs = F.softmax(logits, dim=1).detach().cpu().numpy()
-            # plot probability dist for quantized output
-            utils.plot_probs(probs)
             
         return utils.mu_law_decode(output_audio, mu_quantization)
     

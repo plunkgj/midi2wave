@@ -1,0 +1,13 @@
+{
+    "inference_config": {
+	"test_dir": "test/4s/",
+	"model_filename": "checkpoints/wavenet_0",
+	"device": "cuda:1",
+	"output_dir": "test/4s/",
+	"use_logistic_mix": true,
+	"teacher_force": true,
+	"teacher_length": 2,
+	"no_pedal": false,
+	"audio_hz": 16000
+    }
+}
