@@ -28,6 +28,10 @@
 # https://github.com/NVIDIA/nv-wavenet/blob/master/pytorch/wavenet.py
 
 # Modified by Gary Plunkett, Jan 2019
+# Added fast inference in convolution module, and inference methods with lots of 
+# config options.
+
+# todo: Make the conditioning input convolution optional.
 
 import torch
 import math
