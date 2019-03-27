@@ -63,7 +63,7 @@ class Conv(torch.nn.Module):
                                     kernel_size=kernel_size, stride=stride,
                                     dilation=dilation, bias=bias)
 
-        # Softsign activation recommended by DeepVoice3
+        # Softsign activation recommended by DeepVoice3, a tanh alternative
         self.use_act = use_act
         if self.use_act:
             self.act = torch.nn.Softsign()
@@ -166,7 +166,7 @@ class Wavenet(torch.nn.Module):
     def __init__(self, quantized_input, n_in_channels, n_layers, max_dilation,
                  n_residual_channels, n_skip_channels, n_skip_to_out_channels, n_out_channels,
                  resblock_drop_prob, outFC_drop_prob, in_act_on,
-                 n_cond_channels, cond_act_on, cond_in_transform_on,
+                 n_cond_channels, cond_act_on, cond_in_transform_on, res_out_transform_on,
                  upsamp_scale, upsample_by_copy, upsamp_conv_window):
         super(Wavenet, self).__init__()
 
@@ -177,6 +177,9 @@ class Wavenet(torch.nn.Module):
         self.upscale = upsamp_scale
         self.downscale = 1./upsamp_scale        
 
+        self.cond_in_transform_on = cond_in_transform_on
+        self.res_out_transform_on = res_out_transform_on
+        
         if upsample_by_copy:
             self.upsample = UpsampleByRepetition(self.upscale)      
         else:
@@ -185,8 +188,9 @@ class Wavenet(torch.nn.Module):
                                                      upsamp_conv_window,
                                                      self.upscale)
 
-        self.cond_layers = Conv(n_cond_channels, 2*n_residual_channels*n_layers,
-                                w_init_gain='tanh', use_act=cond_act_on)
+        if self.cond_in_transform_on:
+            self.cond_layers = Conv(n_cond_channels, 2*n_residual_channels*n_layers,
+                                    w_init_gain='tanh', use_act=cond_act_on)
 
         self.dilate_layers = torch.nn.ModuleList()
         self.res_layers = torch.nn.ModuleList()
@@ -216,7 +220,7 @@ class Wavenet(torch.nn.Module):
             self.dilate_layers.append(in_layer)
 
             # last one is not necessary
-            if i < n_layers - 1:
+            if (self.res_out_transform_on) and (i < n_layers - 1):
                 res_layer = Conv(n_residual_channels, n_residual_channels,
                                      w_init_gain='linear')
                 self.res_layers.append(res_layer)
@@ -239,36 +243,49 @@ class Wavenet(torch.nn.Module):
         assert(cond_input.size(2) >= forward_input.size(-1))
         if cond_input.size(2) > forward_input.size(-1):
             cond_input = cond_input[:, :, :forward_input.size(-1)]
-        cond_input = self.cond_layers(cond_input)      
-        cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
 
-        # FLAG for saving layer data
-        cosine_similarity = torch.zeros(cond_input.size())
-        in_acts_stacked = torch.zeros(cond_input.size())
+        if self.cond_in_transform_on:
+            cond_input = self.cond_layers(cond_input)      
+            cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
+
+        # FLAG for saving layer data (cond_acts_stacked too)
+        cond_acts_stacked = torch.zeros(cond_input.size(0), self.n_layers,
+                                        cond_input.size(-2), cond_input.size(-1))
+        in_acts_stacked = torch.zeros(cond_acts_stacked.size())
         
         for i in range(self.n_layers):
             if training:
                 forward_input = self.resblock_dropout(forward_input)
+
             in_act = self.dilate_layers[i](forward_input)
+            if self.cond_in_transform_on:
+                cond_act = cond_input[:, i, :, :]
+            else:
+                cond_act = cond_input
 
-            # capture midi and audio signals for analysis
+            #FLAG rmeove when posterior collapse stops
+            # capture midi and audio signals for analysis.
             in_acts_stacked[:, i, :, :] = in_act.clone()
+            cond_acts_stacked[:, i, :, :] = cond_act.clone()
 
-            in_act = in_act + cond_input[:,i,:,:]            
+            in_act = in_act + cond_act
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
             acts = t_act * s_act
-            if i < len(self.res_layers):
-                res_acts = self.res_layers[i](acts)
-
-            forward_input = res_acts + forward_input
-            forward_input = forward_input * math.sqrt(0.5) #from DeepVoice3, reduce input variance early in training
 
             if i == 0:
                 output = self.skip_layers[i](acts)
             else:
                 output = self.skip_layers[i](acts) + output
-            
+
+            if (self.res_out_transform_on) and (i < len(self.res_layers)):
+                acts = self.res_layers[i](acts)
+
+            forward_input = acts + forward_input
+            forward_input = forward_input * math.sqrt(0.5) #from DeepVoice3, reduce input variance early in training
+
+                
+        # Fully-connected output
         if training:
             output = self.outFC_dropout(output)
         output = torch.nn.functional.relu(output, True)
@@ -287,7 +304,7 @@ class Wavenet(torch.nn.Module):
         first = last * 0.0
         output = torch.cat((first, output), dim=2)
 
-        return output, (in_acts_stacked, cond_input)
+        return output, (in_acts_stacked, cond_acts_stacked)
 
 
     def infer_step(self, cond_input, forward_input):
@@ -297,6 +314,7 @@ class Wavenet(torch.nn.Module):
         """
 
         # Add singleton time dimension
+        # FLAG when I add batching, check size before adding batch dim
         cond_input = cond_input.unsqueeze(-1)
         forward_input = forward_input.unsqueeze(-1)
 

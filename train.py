@@ -146,13 +146,12 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
           use_logistic_mixtures=False, n_mixtures=3,
           audio_hz=16000, midi_hz=250):
 
+    if num_gpus > 1:
+        device = init_distributed(rank, num_gpus, group_name, **dist_config)
     device = torch.device(device)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
-    if num_gpus > 1:
-        init_distributed(rank, num_gpus, group_name, **dist_config)
-
+        
     if use_logistic_mixtures:
         sampler = DML.SampleDiscretizedMixLogistics()
         criterion = DML.DiscretizedMixLogisticLoss()
@@ -239,12 +238,12 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
 
             # Record midi and res block signals at point of combination
             # This step will be removed once I figure out how to prevent posterior collapse
-            signalData = debug.AnalyzeMidiSignal(resblock_acts, signal_writer)
-            signal_writer.writerow({"iteration": str(i),
-                                    "cosim": str(signalData[0]),
-                                    "p-dist": str(signalData[1]),
-                                    "forwardMagnitude": str(signalData[2]),
-                                    "midiMagnitude": str(signalData[3])})
+            # signalData = debug.AnalyzeMidiSignal(resblock_acts, signal_writer)
+            # signal_writer.writerow({"iteration": str(i),
+            #                        "cosim": str(signalData[0]),
+            #                        "p-dist": str(signalData[1]),
+            #                        "forwardMagnitude": str(signalData[2]),
+            #                        "midiMagnitude": str(signalData[3])})
             
             if use_wavenet_autoencoder:
                 q_bar = y_preds[1]
@@ -272,8 +271,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             loss_idx += 1
             if (iteration % 20 == 0):
                 print("floating avg: " + str(loss_sum/loss_idx))
-                loss_writer.writerow({"iteration": str(i),
-                                      "loss": str(reduced_loss)})
+                #loss_writer.writerow({"iteration": str(i),
+                #                     "loss": str(reduced_loss)})
                 loss_sum = 0
                 loss_idx = 0
 

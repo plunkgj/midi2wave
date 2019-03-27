@@ -56,6 +56,10 @@ def init_distributed(rank, num_gpus, group_name, dist_backend, dist_url):
                             world_size=num_gpus, rank=rank,
                             group_name=group_name)
 
+    # Return name of device used to training method.
+    device_name = "cuda:"+ str(rank % torch.cuda.device_count())    
+    return device_name
+    
 def _flatten_dense_tensors(tensors):
     """Flatten dense tensors into a contiguous 1D buffer. Assume tensors are of
     same dense type.
