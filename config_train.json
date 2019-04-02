@@ -1,40 +1,28 @@
 {
     "train_config": {
-	"device": "cuda",
+	"device": "cuda:1",
         "output_directory": "./checkpoints/",
         "epochs": 100000,
         "learning_rate": 1e-3,
         "iters_per_checkpoint": 500,
-        "batch_size": 1,
+        "batch_size": 2,
         "seed": 5206,
         "checkpoint_path": "",
 	"use_scheduled_sampling": false,
 	"use_wavenet_autoencoder": true,
 	"use_variational_autoencoder": false,
 	"diversity_scale": 0.01,
-	"use_logistic_mixtures": true,
-	"n_mixtures": 10
-    },
-
-    "scheduled_sampler_config": {
-	"start_loops": 0,
-	"end_loops": 0,	
-	"start_epsilon": 1,
-	"end_epsilon": 0.1,
-	"decay_iters": 4000,
-	"patience": 1000,
-	"threshold": 0.5,
-	"underloop_prob": 0.0,
-	"start_decaying": true
+	"use_logistic_mixtures": false,
+	"n_mixtures": 3
     },
     
     "data_config": {
 	"dataset_path": "data/train/",
-	"segment_length": 10.0,
+	"segment_length": 7.5,
 	"audio_hz": 16000,
 	"midi_hz": 250,
 	"midi_channels": 89,
-	"no_pedal": false
+	"no_pedal": true
     },
     
     "dist_config": {
@@ -43,42 +31,77 @@
     },
 
     "wavenet_config": {
-	"quantized_input": true,
+	"onehot_input": true,
         "n_in_channels": 256,
+	"use_in_act": false,
+	"use_in_bias": false,
+	
         "n_layers": 22,
         "max_dilation": 2048,
         "n_residual_channels": 32,
-        "n_skip_channels": 128,
-	"n_skip_to_out_channels": 64,
-        "n_out_channels": 30,
-	"resblock_drop_prob": 0.04,
-	"outFC_drop_prob": 0.08,
-	"in_act_on": true,
-	"n_cond_channels": 89,
-	"cond_act_on": false,
-	"cond_in_transform_on": true,
+	"use_dilate_bias": true,
+	"use_res_out_conv": true,
+	"use_res_out_bias": true,
+	"res_block_gain": 1,
+	
+	"n_skip_channels": 128,
+	"use_skip_bias": true,
+	"n_skip_to_out_channels": 256,
+        "n_out_channels": 256,
+
+	"use_conditioning": true,
+	"n_cond_channels": 512,
+	"use_cond_conv": true,	
+	"use_cond_act": false,
+	"use_cond_bias": true,
+	
+        "resblock_drop_prob": 0.042,
+	"out_drop_prob": 0.042,
+
         "upsamp_scale": 64,
 	"upsample_by_copy": true,
-	"upsamp_conv_window": 64
+	"upsamp_conv_window": 64,
+
+	"name": "decoder"
     },
 
+    
     "cond_wavenet_config": {
-    	"quantized_input": false,
-        "n_in_channels": 89,
+    	"onehot_input": false,
+        "n_in_channels": 88,
+	"use_in_act": false,
+	"use_in_bias": false,
+	
         "n_layers": 12,
         "max_dilation": 64,
-        "n_residual_channels": 89,
-        "n_skip_channels": 128,
-	"n_skip_to_out_channels": 256,
-        "n_out_channels": 89,
-	"resblock_drop_prob": 0.0,
-	"outFC_drop_prob": 0.0,
-	"in_act_on": true,
+        "n_residual_channels": 256,
+	"use_dilate_bias": false,
+	"use_res_out_conv": false,	
+        "use_res_out_bias": false,
+	"res_block_gain": 1,
+
+	"n_skip_channels": 512,
+	"use_skip_bias": true,	
+	"n_skip_to_out_channels": 512,
+        "n_out_channels": 512,
+
+	"use_conditioning": false,
 	"n_cond_channels": 1,
-	"cond_act_on": true,
-	"cond_in_transform_on": true,		
-        "upsamp_scale": 1,
+	"use_cond_conv": true,
+	"use_cond_bias": false,
+	"use_cond_act": false,
+
+	"resblock_drop_prob": 0.042,
+	"out_drop_prob": 0.042,
+
+	"upsamp_scale": 1,
 	"upsample_by_copy": true,
-	"upsamp_conv_window": 64
-    }	
+	"upsamp_conv_window": 64,
+
+	"name": "encoder"
+    },
+    
+    "scheduled_sampler_config": {
+    }
+
 }

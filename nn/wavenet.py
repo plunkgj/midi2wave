@@ -38,6 +38,7 @@ import math
 import random
 import time
 from collections import deque
+import debug
 
 import numpy as np
 import torch.nn.functional as F
@@ -113,6 +114,10 @@ class Conv(torch.nn.Module):
             x0 = self.input_memory.pop()
             x0_x1 = torch.cat((x0, x), 2)
             W = self.conv.weight.data
+
+            if self.conv.bias is None:
+                return F.conv1d(x0_x1, W)
+
             B = self.conv.bias.data
             return F.conv1d(x0_x1, W, B)
 
@@ -167,13 +172,16 @@ class QuantizedInputLayer(torch.nn.Module):
     
     
 class Wavenet(torch.nn.Module):
-    def __init__(self, quantized_input, n_in_channels, n_layers, max_dilation,
-                 n_residual_channels, n_skip_channels, n_skip_to_out_channels, n_out_channels,
-                 resblock_drop_prob, outFC_drop_prob, in_act_on,
-                 n_cond_channels, cond_act_on, cond_in_transform_on, res_out_transform_on,
-                 upsamp_scale, upsample_by_copy, upsamp_conv_window):
+    def __init__(self, onehot_input, n_in_channels, use_in_bias, use_in_act,
+                 n_layers, max_dilation, n_residual_channels, use_dilate_bias, use_res_out_conv, use_res_out_bias, res_block_gain,
+                 n_skip_channels, use_skip_bias, n_skip_to_out_channels, n_out_channels,
+                 use_conditioning, n_cond_channels, use_cond_conv, use_cond_bias, use_cond_act,
+                 resblock_drop_prob, out_drop_prob,
+                 upsamp_scale, upsample_by_copy, upsamp_conv_window, name):
         super(Wavenet, self).__init__()
 
+        self.name = name
+        
         self.n_layers = n_layers
         self.max_dilation = max_dilation
         self.n_residual_channels = n_residual_channels 
@@ -181,8 +189,17 @@ class Wavenet(torch.nn.Module):
         self.upscale = upsamp_scale
         self.downscale = 1./upsamp_scale        
 
-        self.cond_in_transform_on = cond_in_transform_on
-        self.res_out_transform_on = res_out_transform_on
+        # FLAG need to change forward() in case of use_conditioning=False
+        self.use_conditioning = use_conditioning
+        self.use_cond_conv = use_cond_conv        
+        self.use_cond_bias = use_cond_bias
+
+        self.use_dilate_bias = use_dilate_bias
+        self.use_skip_bias = use_skip_bias
+        self.use_res_out_bias = use_res_out_bias
+        
+        self.use_res_out_conv = use_res_out_conv
+        self.res_block_gain = res_block_gain
         
         if upsample_by_copy:
             self.upsample = UpsampleByRepetition(self.upscale)      
@@ -192,54 +209,64 @@ class Wavenet(torch.nn.Module):
                                                      upsamp_conv_window,
                                                      self.upscale)
 
-        if self.cond_in_transform_on:
+        if self.use_cond_conv:
             self.cond_layers = Conv(n_cond_channels, 2*n_residual_channels*n_layers,
-                                    w_init_gain='tanh', use_act=cond_act_on)
+                                    w_init_gain='tanh', use_act=use_cond_act,
+                                    bias=self.use_cond_bias)
 
         self.dilate_layers = torch.nn.ModuleList()
         self.res_layers = torch.nn.ModuleList()
         self.skip_layers = torch.nn.ModuleList()
-        
-        if quantized_input:
-            self.in_layer = QuantizedInputLayer(n_in_channels, n_residual_channels,
-                                                in_act_on)
-        else:
-            self.in_layer = Conv(n_in_channels, n_residual_channels, bias=False,
-                                 w_init_gain='tanh', use_act=in_act_on)
 
-        self.resblock_dropout = torch.nn.Dropout(p=resblock_drop_prob)
-        self.outFC_dropout = torch.nn.Dropout(p=outFC_drop_prob)        
+        # input layer 
+        if onehot_input:
+            self.in_layer = QuantizedInputLayer(n_in_channels, n_residual_channels,
+                                                use_in_act)
+        else:
+            self.in_layer = Conv(n_in_channels, n_residual_channels,
+                                 w_init_gain='tanh', bias=use_in_bias ,
+                                 use_act=use_in_act)
 
         self.conv_out = Conv(n_skip_channels, n_skip_to_out_channels,
                              bias=False, w_init_gain='relu')
         self.conv_end = Conv(n_skip_to_out_channels, n_out_channels,
                              bias=False, w_init_gain='linear')
 
+        # res blocks
         loop_factor = math.floor(math.log2(max_dilation)) + 1
         for i in range(n_layers):
             dilation = 2 ** (i % loop_factor)
             in_layer = Conv(n_residual_channels, 2*n_residual_channels,
-                                kernel_size=2, dilation=dilation,
-                                w_init_gain='tanh', is_causal=True)
+                            kernel_size=2, dilation=dilation,
+                            w_init_gain='tanh', is_causal=True,
+                            bias=self.use_dilate_bias)
             self.dilate_layers.append(in_layer)
 
             # last one is not necessary
-            if (self.res_out_transform_on) and (i < n_layers - 1):
+            if (self.use_res_out_conv) and (i < n_layers - 1):
                 res_layer = Conv(n_residual_channels, n_residual_channels,
-                                     w_init_gain='linear')
+                                 w_init_gain='linear', bias=self.use_res_out_bias)
                 self.res_layers.append(res_layer)
 
             skip_layer = Conv(n_residual_channels, n_skip_channels,
-                                  w_init_gain='relu')
+                                  w_init_gain='relu', bias=self.use_skip_bias)
             self.skip_layers.append(skip_layer)
 
+        self.resblock_dropout = torch.nn.Dropout(p=resblock_drop_prob)
+        self.out_dropout = torch.nn.Dropout(p=out_drop_prob)
+            
+            
     def forward(self, forward_input, training=True):
 
         features = forward_input[0]
         forward_input = forward_input[1]
 
+        # debug.plot_tensor(forward_input, "test/" + self.name + "/raw_input")
+        
         forward_input = self.in_layer(forward_input)
 
+        # debug.plot_tensor(forward_input, "test/" + self.name + "/input_transform")
+        
         if (self.upscale != 1):
             cond_input = self.upsample(features)
         else:
@@ -247,22 +274,28 @@ class Wavenet(torch.nn.Module):
         assert(cond_input.size(2) >= forward_input.size(-1))
         if cond_input.size(2) > forward_input.size(-1):
             cond_input = cond_input[:, :, :forward_input.size(-1)]
+        if self.use_cond_conv:
+            cond_input = self.cond_layers(cond_input)
 
-        if self.cond_in_transform_on:
-            cond_input = self.cond_layers(cond_input)      
+            # debug.plot_tensor(cond_input, "test/"  + self.name + "/cond_input")
+            
             cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
 
+
+            
         # FLAG for saving layer data (cond_acts_stacked too)
         cond_acts_stacked = torch.zeros(cond_input.size(0), self.n_layers,
                                         cond_input.size(-2), cond_input.size(-1))
         in_acts_stacked = torch.zeros(cond_acts_stacked.size())
-        
+
+        # Residual block loop
         for i in range(self.n_layers):
             if training:
                 forward_input = self.resblock_dropout(forward_input)
 
             in_act = self.dilate_layers[i](forward_input)
-            if self.cond_in_transform_on:
+
+            if self.use_cond_conv:
                 cond_act = cond_input[:, i, :, :]
             else:
                 cond_act = cond_input
@@ -277,25 +310,29 @@ class Wavenet(torch.nn.Module):
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
             acts = t_act * s_act
 
+            # debug.plot_tensor(acts, "test/" + self.name + "/act" + str(i))
+            
             if i == 0:
                 output = self.skip_layers[i](acts)
             else:
                 output = self.skip_layers[i](acts) + output
 
-            if (self.res_out_transform_on) and (i < len(self.res_layers)):
+            if (self.use_res_out_conv) and (i < len(self.res_layers)):
                 acts = self.res_layers[i](acts)
 
             forward_input = acts + forward_input
-            forward_input = forward_input * math.sqrt(0.5) #from DeepVoice3, reduce input variance early in training
+            forward_input = forward_input * self.res_block_gain #from DeepVoice3, reduce input variance early in training
 
-                
+
+        # debug.plot_tensor(output, "test/" + self.name + "/skip_out")
+            
         # Fully-connected output
         if training:
-            output = self.outFC_dropout(output)
+            output = self.out_dropout(output)
         output = torch.nn.functional.relu(output, True)
         output = self.conv_out(output)
         if training:
-            output = self.outFC_dropout(output)
+            output = self.out_dropout(output)
         output = torch.nn.functional.relu(output, True)
         output = self.conv_end(output)
 
@@ -308,6 +345,8 @@ class Wavenet(torch.nn.Module):
         first = last * 0.0
         output = torch.cat((first, output), dim=2)
 
+        # debug.plot_tensor(output, "test/" + self.name + "/final_out")
+        
         return output, (in_acts_stacked, cond_acts_stacked)
 
 
@@ -324,22 +363,31 @@ class Wavenet(torch.nn.Module):
 
         forward_input = self.in_layer(forward_input)
 
+        # Residual block loop
         for i in range(self.n_layers):
+
             in_act = self.dilate_layers[i].infer_step(forward_input)
-            in_act = in_act + cond_input[:, i, :, :]
+            if self.use_cond_conv:
+                cond_act = cond_input[:, i, :, :]
+            else:
+                cond_act = cond_input
+            
+            in_act = in_act + cond_act
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
             acts = t_act * s_act
-            if i < len(self.res_layers):
-                res_acts = self.res_layers[i](acts)
 
-            forward_input = res_acts + forward_input
-            forward_input = forward_input * math.sqrt(0.5)
-            
             if i == 0:
                 output = self.skip_layers[i](acts)
             else:
                 output = self.skip_layers[i](acts) + output
+
+            if (self.use_res_out_conv) and (i < len(self.res_layers)):
+                acts = self.res_layers[i](acts)
+
+            forward_input = acts + forward_input
+            forward_input = forward_input * self.res_block_gain
+            
 
         output = torch.nn.functional.relu(output, True)
         output = self.conv_out(output)
@@ -380,9 +428,10 @@ class Wavenet(torch.nn.Module):
             assert(batch_size > 0 and cond_channels > 0)
             cond_features = torch.zeros(size=[batch_size, cond_channels, length]).to(device)
 
-        # make condition features for every timestep and res layer
-        cond_features = self.cond_layers(cond_features)
-        cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
+        if self.use_cond_conv:
+            # make condition features for every timestep and res layer
+            cond_features = self.cond_layers(cond_features)
+            cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
 
         # output buffers
         logits = torch.zeros(self.n_out_channels, length).to(device)
@@ -397,8 +446,8 @@ class Wavenet(torch.nn.Module):
         if use_logistic_mix:
             sampler = SampleDiscretizedMixLogistics()
         else:
-            sampler = utils.CatagoricalSampler()
-            
+            sampler = utils.CategoricalSampler()
+
         #################
         # inference loop:
         ##################
@@ -410,8 +459,11 @@ class Wavenet(torch.nn.Module):
             if (s%100 == 0):
                 print(str(s / length), end='\r', flush=True)
 
-            cond_sample = cond_features[:, :, :, s]
-
+            if self.use_cond_conv:
+                cond_sample = cond_features[:, :, :, s]
+            else:
+                cond_sample = cond_features[:, :, s]
+                
             # flip biased coin to see if raandom sample used
             if randomize_input and (random.uniform < rand_sample_chance):
                     forward_sample = torch.randint_like(forward_sample,
@@ -424,6 +476,9 @@ class Wavenet(torch.nn.Module):
                     forward_sample = output_audio[:, s].clone()
 
             logits[:, s+1] = self.infer_step(cond_sample, forward_sample)
+
+            print("logits size: " + str(logits.size()))
+            
             output_audio[:, s+1] = sampler(logits[:, s+1])
 
         end_time = time.time()
@@ -432,9 +487,6 @@ class Wavenet(torch.nn.Module):
         ###################
 
         print("Inference complete in " + str(end_time - start_time))
-
-        if not use_logistic_mix:
-            probs = F.softmax(logits, dim=1).detach().cpu().numpy()
             
         return utils.mu_law_decode(output_audio, mu_quantization)
     
@@ -504,18 +556,3 @@ class Wavenet(torch.nn.Module):
             cond_input = cond_input.permute(2,0,1,3)
 
         return cond_input
-
-        """
-        view_mididif = cond_input[0].detach().t().cpu() - self.cond_layers.conv.bias.cpu()
-
-        plt.cla()
-        plt.imshow(mididif.t().detach(), cmap="inferno", interpolation="nearest", aspect="auto", origin="lower")
-        plt.savefig("verifyData/cond_acts_" + str(iteration) + ".png")
-        """
-
-
-        """
-        plt.cla()
-        plt.imshow(cond_acts[0, i].detach().cpu(), cmap="inferno", interpolation="nearest", aspect="auto", origin="lower")
-        plt.savefig("verifyData/cond_acts_" + str(i) + "_" + str(iteration) + ".png")
-        """
