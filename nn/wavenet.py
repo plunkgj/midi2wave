@@ -170,12 +170,13 @@ class QuantizedInputLayer(torch.nn.Module):
             x = self.act(x)
         return x
     
+# FLAG make activations separate from Conv
     
 class Wavenet(torch.nn.Module):
     def __init__(self, onehot_input, n_in_channels, use_in_bias, use_in_act,
                  n_layers, max_dilation, n_residual_channels, use_dilate_bias, use_res_out_conv, use_res_out_bias, res_block_gain,
-                 n_skip_channels, use_skip_bias, n_skip_to_out_channels, n_out_channels,
-                 use_conditioning, n_cond_channels, use_cond_conv, use_cond_bias, use_cond_act,
+                 use_skip_out, n_skip_channels, use_skip_bias, n_skip_to_out_channels, n_out_channels,
+                 use_conditioning, same_cond_each_resblock, n_cond_channels, use_cond_conv, use_cond_bias, use_cond_act,
                  resblock_drop_prob, out_drop_prob,
                  upsamp_scale, upsample_by_copy, upsamp_conv_window, name):
         super(Wavenet, self).__init__()
@@ -191,9 +192,12 @@ class Wavenet(torch.nn.Module):
 
         # FLAG need to change forward() in case of use_conditioning=False
         self.use_conditioning = use_conditioning
+        self.same_cond_each_resblock = same_cond_each_resblock
         self.use_cond_conv = use_cond_conv        
         self.use_cond_bias = use_cond_bias
 
+        self.use_skip_out = use_skip_out
+        
         self.use_dilate_bias = use_dilate_bias
         self.use_skip_bias = use_skip_bias
         self.use_res_out_bias = use_res_out_bias
@@ -210,13 +214,18 @@ class Wavenet(torch.nn.Module):
                                                      self.upscale)
 
         if self.use_cond_conv:
-            self.cond_layers = Conv(n_cond_channels, 2*n_residual_channels*n_layers,
+            if self.same_cond_each_resblock:
+                cond_out_ch = 2*n_residual_channels
+            else:
+                cond_out_ch = 2*n_residual_channels*n_layers
+            self.cond_layers = Conv(n_cond_channels, cond_out_ch,
                                     w_init_gain='tanh', use_act=use_cond_act,
                                     bias=self.use_cond_bias)
 
         self.dilate_layers = torch.nn.ModuleList()
         self.res_layers = torch.nn.ModuleList()
-        self.skip_layers = torch.nn.ModuleList()
+        if self.use_skip_out:
+            self.skip_layers = torch.nn.ModuleList()
 
         # input layer 
         if onehot_input:
@@ -224,13 +233,14 @@ class Wavenet(torch.nn.Module):
                                                 use_in_act)
         else:
             self.in_layer = Conv(n_in_channels, n_residual_channels,
-                                 w_init_gain='tanh', bias=use_in_bias ,
+                                 w_init_gain='tanh', bias=use_in_bias,
                                  use_act=use_in_act)
 
-        self.conv_out = Conv(n_skip_channels, n_skip_to_out_channels,
-                             bias=False, w_init_gain='relu')
-        self.conv_end = Conv(n_skip_to_out_channels, n_out_channels,
-                             bias=False, w_init_gain='linear')
+        if self.use_skip_out:
+            self.conv_out = Conv(n_skip_channels, n_skip_to_out_channels,
+                                 bias=False, w_init_gain='relu')
+            self.conv_end = Conv(n_skip_to_out_channels, n_out_channels,
+                                 bias=False, w_init_gain='linear')
 
         # res blocks
         loop_factor = math.floor(math.log2(max_dilation)) + 1
@@ -248,12 +258,15 @@ class Wavenet(torch.nn.Module):
                                  w_init_gain='linear', bias=self.use_res_out_bias)
                 self.res_layers.append(res_layer)
 
-            skip_layer = Conv(n_residual_channels, n_skip_channels,
+            if self.use_skip_out:
+                skip_layer = Conv(n_residual_channels, n_skip_channels,
                                   w_init_gain='relu', bias=self.use_skip_bias)
-            self.skip_layers.append(skip_layer)
+                self.skip_layers.append(skip_layer)
 
         self.resblock_dropout = torch.nn.Dropout(p=resblock_drop_prob)
-        self.out_dropout = torch.nn.Dropout(p=out_drop_prob)
+
+        if self.use_skip_out:
+            self.out_dropout = torch.nn.Dropout(p=out_drop_prob)
             
             
     def forward(self, forward_input, training=True):
@@ -261,32 +274,25 @@ class Wavenet(torch.nn.Module):
         features = forward_input[0]
         forward_input = forward_input[1]
 
+        if self.use_conditioning:
+            if (self.upscale != 1):
+                cond_input = self.upsample(features)
+            else:
+                cond_input = features
+            assert(cond_input.size(2) >= forward_input.size(-1))
+            if cond_input.size(2) > forward_input.size(-1):
+                cond_input = cond_input[:, :, :forward_input.size(-1)]
+            if self.use_cond_conv:
+                cond_input = self.cond_layers(cond_input)
+                # debug.plot_tensor(cond_input, "test/"  + self.name + "/cond_input")
+            if not self.same_cond_each_resblock:
+                cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
+
         # debug.plot_tensor(forward_input, "test/" + self.name + "/raw_input")
         
         forward_input = self.in_layer(forward_input)
 
         # debug.plot_tensor(forward_input, "test/" + self.name + "/input_transform")
-        
-        if (self.upscale != 1):
-            cond_input = self.upsample(features)
-        else:
-            cond_input = features
-        assert(cond_input.size(2) >= forward_input.size(-1))
-        if cond_input.size(2) > forward_input.size(-1):
-            cond_input = cond_input[:, :, :forward_input.size(-1)]
-        if self.use_cond_conv:
-            cond_input = self.cond_layers(cond_input)
-
-            # debug.plot_tensor(cond_input, "test/"  + self.name + "/cond_input")
-            
-            cond_input = cond_input.view(cond_input.size(0), self.n_layers, -1, cond_input.size(2))
-
-
-            
-        # FLAG for saving layer data (cond_acts_stacked too)
-        cond_acts_stacked = torch.zeros(cond_input.size(0), self.n_layers,
-                                        cond_input.size(-2), cond_input.size(-1))
-        in_acts_stacked = torch.zeros(cond_acts_stacked.size())
 
         # Residual block loop
         for i in range(self.n_layers):
@@ -295,27 +301,24 @@ class Wavenet(torch.nn.Module):
 
             in_act = self.dilate_layers[i](forward_input)
 
-            if self.use_cond_conv:
-                cond_act = cond_input[:, i, :, :]
-            else:
-                cond_act = cond_input
-
-            #FLAG rmeove when posterior collapse stops
-            # capture midi and audio signals for analysis.
-            in_acts_stacked[:, i, :, :] = in_act.clone()
-            cond_acts_stacked[:, i, :, :] = cond_act.clone()
-
-            in_act = in_act + cond_act
+            if self.use_conditioning:
+                if self.same_cond_each_resblock:
+                    cond_act = cond_input
+                else:
+                    cond_act = cond_input[:, i, :, :]
+                in_act = in_act + cond_act                    
+            
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
             acts = t_act * s_act
 
             # debug.plot_tensor(acts, "test/" + self.name + "/act" + str(i))
-            
-            if i == 0:
-                output = self.skip_layers[i](acts)
-            else:
-                output = self.skip_layers[i](acts) + output
+
+            if self.use_skip_out:
+                if i == 0:
+                    output = self.skip_layers[i](acts)
+                else:
+                    output = self.skip_layers[i](acts) + output
 
             if (self.use_res_out_conv) and (i < len(self.res_layers)):
                 acts = self.res_layers[i](acts)
@@ -324,18 +327,24 @@ class Wavenet(torch.nn.Module):
             forward_input = forward_input * self.res_block_gain #from DeepVoice3, reduce input variance early in training
 
 
-        # debug.plot_tensor(output, "test/" + self.name + "/skip_out")
-            
-        # Fully-connected output
-        if training:
-            output = self.out_dropout(output)
-        output = torch.nn.functional.relu(output, True)
-        output = self.conv_out(output)
-        if training:
-            output = self.out_dropout(output)
-        output = torch.nn.functional.relu(output, True)
-        output = self.conv_end(output)
+        # Feed forward output if using skip out
+        if self.use_skip_out:
 
+            # debug.plot_tensor(output, "test/" + self.name + "/skip_out")
+            
+            # Fully-connected output
+            if training:
+                output = self.out_dropout(output)
+            output = torch.nn.functional.relu(output, True)
+            output = self.conv_out(output)
+            if training:
+                output = self.out_dropout(output)
+            output = torch.nn.functional.relu(output, True)
+            output = self.conv_end(output)
+
+        else:
+            output = forward_input
+            
         # Remove last probabilities because they've seen all the data
         last = output[:, :, -1]
         last = last.unsqueeze(2)
@@ -347,7 +356,7 @@ class Wavenet(torch.nn.Module):
 
         # debug.plot_tensor(output, "test/" + self.name + "/final_out")
         
-        return output, (in_acts_stacked, cond_acts_stacked)
+        return output
 
 
     def infer_step(self, cond_input, forward_input):
@@ -367,20 +376,23 @@ class Wavenet(torch.nn.Module):
         for i in range(self.n_layers):
 
             in_act = self.dilate_layers[i].infer_step(forward_input)
-            if self.use_cond_conv:
-                cond_act = cond_input[:, i, :, :]
-            else:
-                cond_act = cond_input
-            
-            in_act = in_act + cond_act
+
+            if self.use_conditioning:
+                if self.use_cond_conv:
+                    cond_act = cond_input[:, i, :, :]
+                else:
+                    cond_act = cond_input
+                in_act = in_act + cond_act
+                
             t_act = F.tanh(in_act[:, :self.n_residual_channels, :])
             s_act = F.sigmoid(in_act[:, self.n_residual_channels:, :])
             acts = t_act * s_act
 
-            if i == 0:
-                output = self.skip_layers[i](acts)
-            else:
-                output = self.skip_layers[i](acts) + output
+            if self.use_skip_out:
+                if i == 0:
+                    output = self.skip_layers[i](acts)
+                else:
+                    output = self.skip_layers[i](acts) + output
 
             if (self.use_res_out_conv) and (i < len(self.res_layers)):
                 acts = self.res_layers[i](acts)
@@ -388,12 +400,14 @@ class Wavenet(torch.nn.Module):
             forward_input = acts + forward_input
             forward_input = forward_input * self.res_block_gain
             
-
-        output = torch.nn.functional.relu(output, True)
-        output = self.conv_out(output)
-        output = torch.nn.functional.relu(output, True)
-        output = self.conv_end(output).squeeze()
-
+        if self.use_skip_out:
+            output = torch.nn.functional.relu(output, True)
+            output = self.conv_out(output)
+            output = torch.nn.functional.relu(output, True)
+            output = self.conv_end(output).squeeze()
+        else:
+            output = forward_input
+            
         return output
 
     
@@ -431,6 +445,7 @@ class Wavenet(torch.nn.Module):
         if self.use_cond_conv:
             # make condition features for every timestep and res layer
             cond_features = self.cond_layers(cond_features)
+        if not self.same_cond_each_resblock:
             cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
 
         # output buffers
@@ -476,8 +491,6 @@ class Wavenet(torch.nn.Module):
                     forward_sample = output_audio[:, s].clone()
 
             logits[:, s+1] = self.infer_step(cond_sample, forward_sample)
-
-            print("logits size: " + str(logits.size()))
             
             output_audio[:, s+1] = sampler(logits[:, s+1])
 

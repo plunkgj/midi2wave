@@ -108,26 +108,27 @@ class L2DiversityLoss(torch.nn.Module):
         loss = torch.sum((k*q_bar - 1) ** 2)
         return loss
     
-def load_checkpoint(checkpoint_path, model, optimizer):
+def load_checkpoint(checkpoint_path, model, encoder_optimizer, decoder_optimizer):
     assert os.path.isfile(checkpoint_path)
     checkpoint_dict = torch.load(checkpoint_path, map_location='cpu')
     iteration = checkpoint_dict['iteration']
-    optimizer.load_state_dict(checkpoint_dict['optimizer'])
+    aggressive = checkpoint_dict['aggressive']    
+    decoder_optimizer.load_state_dict(checkpoint_dict['decoder_optimizer'])
+    encoder_optimizer.load_state_dict(checkpoint_dict['encoder_optimizer'])    
     model_for_loading = checkpoint_dict['model']
     model.load_state_dict(model_for_loading.state_dict())
     print("Loaded checkpoint '{}' (iteration {})" .format(
           checkpoint_path, iteration))
-    return model, optimizer, encoder_optimizer, decoder_optimizer, aggressive, iteration
+    return model, encoder_optimizer, decoder_optimizer, aggressive, iteration
 
 
-def save_checkpoint_autoencoder(model, device, use_VAE, optimizer, encoder_optimizer, decoder_optimizer, aggressive,  learning_rate, iteration, filepath):
+def save_checkpoint_autoencoder(model, device, use_VAE, encoder_optimizer, decoder_optimizer, aggressive,  learning_rate, iteration, filepath):
     print("Saving model and optimizer state at iteration {} to {}".format(
           iteration, filepath))
     model_for_saving = WavenetAutoencoder(wavenet_config, cond_wavenet_config, use_VAE).to(device)
     model_for_saving.load_state_dict(model.state_dict())
     torch.save({'model': model_for_saving,
                 'iteration': iteration,
-                'optimizer': optimizer.state_dict(),
                 'encoder_optimizer': encoder_optimizer.state_dict(),
                 'decoder_optimizer': decoder_optimizer.state_dict(),
                 'aggressive': aggressive,
@@ -139,7 +140,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
           use_scheduled_sampling=False,
           use_wavenet_autoencoder=True, use_variational_autoencoder=False, diversity_scale=0.005,
           use_logistic_mixtures=False, n_mixtures=3,
-          audio_hz=16000, midi_hz=250, agressive_loss_threshold=3.5):
+          audio_hz=16000, midi_hz=250, aggressive_loss_threshold=3.0, encoder_error_thresh=0.0):
 
     assert use_wavenet_autoencoder is True
     
@@ -168,7 +169,6 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     
     encoder_optimizer = torch.optim.Adam(model.encoder_wavenet.parameters(), lr=learning_rate)
     decoder_optimizer = torch.optim.Adam(model.wavenet.parameters(), lr=learning_rate)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Train state params
     aggressive = True
@@ -177,7 +177,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     # Load checkpoint if one exists
     iteration = 0
     if checkpoint_path != "":
-        model, optimizer, encoder_optimizer, decoder_optimizer, aggressive, iteration = load_checkpoint(checkpoint_path, model, optimizer)
+        model, encoder_optimizer, decoder_optimizer, aggressive, iteration = load_checkpoint(checkpoint_path, model, encoder_optimizer, decoder_optimizer)
         iteration += 1
 
     # Dataloader
@@ -234,16 +234,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             if use_scheduled_sampling:
                 y = scheduled_sampler(x, y)                
 
-            y_preds, resblock_acts = model((x, y))
-            
-            # Record midi and res block signals at point of combination
-            # This step will be removed once I figure out how to prevent posterior collapse
-            # signalData = debug.AnalyzeMidiSignal(resblock_acts, signal_writer)
-            # signal_writer.writerow({"iteration": str(i),
-            #                        "cosim": str(signalData[0]),
-            #                        "p-dist": str(signalData[1]),
-            #                        "forwardMagnitude": str(signalData[2]),
-            #                        "midiMagnitude": str(signalData[3])})
+            y_preds = model((x, y))
             
             if use_wavenet_autoencoder:
                 q_bar = y_preds[1]
@@ -261,15 +252,16 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                 
             if aggressive and train_encoder:
                 encoder_optimizer.step()
-                print("Encoder step")
+                print("Encoder step")                    
                 
             elif aggressive:
                 decoder_optimizer.step()
                 print("Decoder step")
-                
-            else: # normal training
-                optimizer.step()
 
+            else: # normal training
+                encoder_optimizer.step()
+                decoder_optimizer.step()
+                
             print("total loss:     {}:\t{:.9f}".format(iteration, reduced_loss))
             if use_variational_autoencoder:
                 print("    diversity loss: {:.9f}".format(div_loss))
@@ -286,9 +278,9 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                 #loss_writer.writerow({"iteration": str(i),
                 #                     "loss": str(reduced_loss)})
 
-                if aggressive and loss_avg < agressive_loss_threshold:
+                if aggressive and loss_avg < aggressive_loss_threshold:
                     agressive = False
-                elif aggressive and train_encoder and loss_avg >= prev_loss:
+                elif aggressive and train_encoder and loss_avg >= (prev_loss + encoder_error_thresh):
                     train_encoder = False
                 elif aggressive:
                     train_encoder = True
@@ -302,7 +294,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
                 if rank == 0:
                     checkpoint_path = "{}/wavenet_{}".format(output_directory, iteration)
                     save_checkpoint_autoencoder(model, device, use_variational_autoencoder,
-                                                optimizer, encoder_optimizer, decoder_optimizer,
+                                                encoder_optimizer, decoder_optimizer,
                                                 aggressive, learning_rate, iteration, checkpoint_path)
 
             iteration += 1

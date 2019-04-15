@@ -172,8 +172,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
     if use_scheduled_sampling:
         scheduled_sampler = ScheduledSamplerWithPatience(model, sampler, **scheduled_sampler_config)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.0004)
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    
     # Load checkpoint if one exists
     iteration = 0
     if checkpoint_path != "":
@@ -225,6 +225,7 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
         for i, batch in enumerate(train_loader):
 
             model.zero_grad()
+
             x, y = batch
 
             x = as_variable(x, device)
@@ -234,17 +235,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             if use_scheduled_sampling:
                 y = scheduled_sampler(x, y)                
 
-            y_preds, resblock_acts = model((x, y))
+            y_preds = model((x, y))
 
-            # Record midi and res block signals at point of combination
-            # This step will be removed once I figure out how to prevent posterior collapse
-            # signalData = debug.AnalyzeMidiSignal(resblock_acts, signal_writer)
-            # signal_writer.writerow({"iteration": str(i),
-            #                        "cosim": str(signalData[0]),
-            #                        "p-dist": str(signalData[1]),
-            #                        "forwardMagnitude": str(signalData[2]),
-            #                        "midiMagnitude": str(signalData[3])})
-            
             if use_wavenet_autoencoder:
                 q_bar = y_preds[1]
                 y_preds = y_preds[0]
@@ -290,7 +282,8 @@ def train(num_gpus, rank, group_name, device, output_directory, epochs, learning
             iteration += 1            
             del loss
         # end loop
-
+            
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str,

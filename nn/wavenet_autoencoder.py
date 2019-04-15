@@ -26,9 +26,7 @@ class WavenetAutoencoder(torch.nn.Module):
         forward_input = forward_input[1]
         device = midi_features.device
         
-        #Conditioning wavenet takes in null features
-        null_features = torch.zeros(midi_features.size(0), 1, midi_features.size(2)).to(device)
-        cond_features, _ = self.encoder_wavenet((null_features, midi_features), training)
+        cond_features = self.encoder_wavenet((None, midi_features), training)
 
         # debug.plot_tensor(cond_features.squeeze(), "test/in_train")
         
@@ -36,9 +34,12 @@ class WavenetAutoencoder(torch.nn.Module):
         if self.use_VAE:
             cond_features, q_bar = self.argmax_autoencode(cond_features)
 
-        y_preds, act_data = self.wavenet((cond_features, forward_input), training)
-        
-        return (y_preds, q_bar), act_data
+        y_preds = self.wavenet((cond_features, forward_input), training)
+
+        if training:
+            return (y_preds, q_bar)
+
+        return y_preds
 
     def export_weights(self):
         """
@@ -73,7 +74,7 @@ class WavenetAutoencoder(torch.nn.Module):
         batch_size = midi_features.size(0)
         null_features = torch.zeros(batch_size, 1, midi_features.size(2)).to(midi_features.device)
         # FLAG get rid of _ after I stop outputting resblock signal
-        cond_features, _ = self.encoder_wavenet((null_features, midi_features), training=False)
+        cond_features = self.encoder_wavenet((null_features, midi_features), training=False)
 
         if self.use_VAE:
             cond_features, _ = self.argmax_autoencode(cond_features)
