@@ -102,7 +102,8 @@ class CategoricalSampler(torch.nn.Module):
         if (len(X.size()) == 2):
             X = X.unsqueeze(0)
 
-        X = torch.transpose(X, 1, 2)
+        if (len(X.size()) > 1):
+            X = torch.transpose(X, 1, 2)
             
         return torch.distributions.categorical.Categorical(logits=X).sample()
 

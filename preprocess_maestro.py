@@ -44,7 +44,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def Midi2Tensor(filename, midi_hz):
+def Midi2Tensor(filename, midi_hz, only_onsets):
     """
     Return midi onsets as a sparse numpy matrix.
     Resamples midi to the specified Hz by decimation
@@ -60,14 +60,26 @@ def Midi2Tensor(filename, midi_hz):
     tick = []
     pitch = []
     
-    # make a onehot vector for each notes' on set and offset
-    for note in notes:        
-        tick.append( int(np.floor(note.start * midi_hz)) )
+    # Add midi information
+    for note in notes:
         assert(note.pitch>20 and note.pitch<110)
-        pitch.append(note.pitch - 21)
-        vel.append(note.velocity / 127)
+
+        first_tick = int(np.floor(note.start * midi_hz))
+
+        # Option to only record initial press
+        if only_onsets:
+            tick.append(first_tick)
+            pitch.append(note.pitch - 21)
+            vel.append(note.velocity / 127)
+            continue
+        
+        last_tick = int(np.floor(note.end * midi_hz))
+        for this_tick in range(first_tick, last_tick):
+            tick.append(this_tick)
+            pitch.append(note.pitch - 21)
+            vel.append(note.velocity / 127)
             
-    # make a onehot vector for each pedal change
+    # Add pedal information
     for ped in pedals:
         assert(ped.number==64)
         tick.append( int(np.floor(ped.time * midi_hz)) )
@@ -133,6 +145,7 @@ def SaveTestData(audioX, midiX, fileNum, output_dir, test_segment_length, audio_
     
 def PreprocessMaestro(train_or_test, maestro_dir, split, out_dir,
                        audio_hz=16000, midi_hz=250,
+                       only_onsets=False,
                        mu_law_encode=True, mu_quantization=256, test_segment_length=4,
                        only_audio=False, only_midi=False, no_output_csv=False, separate_audio_dir=None):
     """
@@ -208,7 +221,7 @@ def PreprocessMaestro(train_or_test, maestro_dir, split, out_dir,
         # Save sparse midi tensor
         midiX = None
         if not only_audio:
-            midiX = Midi2Tensor(midi_filename, midi_hz)
+            midiX = Midi2Tensor(midi_filename, midi_hz, only_onsets)
             if train_or_test=="train":
                 np.savez(out_dir + str(i),
                          data=midiX.data,
@@ -229,10 +242,7 @@ def PreprocessMaestro(train_or_test, maestro_dir, split, out_dir,
 if __name__ == "__main__":
 
     parser=argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, help="Location of configuration file")
-    parser.add_argument('-d', '--data_usage', type=str, choices=["train", "test"],
-                        help="What is this data going to be used for? Train and test data saved differently.")
-    
+    parser.add_argument('-c', '--config', type=str, help="Location of configuration file")    
     args = parser.parse_args()
 
     # Parse config file
@@ -240,4 +250,4 @@ if __name__ == "__main__":
         data = f.read()
     config = json.loads(data)["preprocess_config"]
 
-    PreprocessMaestro(args.data_usage, **config)
+    PreprocessMaestro(**config)

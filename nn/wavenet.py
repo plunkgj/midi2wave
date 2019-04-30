@@ -1,3 +1,4 @@
+
 #  Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 # 
 #  Redistribution and use in source and binary forms, with or without
@@ -24,14 +25,14 @@
 # 
 # *****************************************************************************
 
-# forked from nv-wavenet/pytorch:
-# https://github.com/NVIDIA/nv-wavenet/blob/master/pytorch/wavenet.py
+"""
+wavenet.py forked from nv-wavenet/pytorch:
+https://github.com/NVIDIA/nv-wavenet/blob/master/pytorch/wavenet.py
 
-# Modified by Gary Plunkett, Jan 2019
-# Added fast inference in convolution module, and inference methods with lots of 
-# config options.
-
-# todo: Make the conditioning input convolution optional.
+Modified by Gary Plunkett, Jan 2019
+Added fast inference in convolution module, inference methods, and lots
+of config options.
+"""
 
 import torch
 import math
@@ -119,6 +120,7 @@ class Conv(torch.nn.Module):
                 return F.conv1d(x0_x1, W)
 
             B = self.conv.bias.data
+            
             return F.conv1d(x0_x1, W, B)
 
     def init_input_memory(self, x):
@@ -169,8 +171,7 @@ class QuantizedInputLayer(torch.nn.Module):
         if self.use_act:
             x = self.act(x)
         return x
-    
-# FLAG make activations separate from Conv
+
     
 class Wavenet(torch.nn.Module):
     def __init__(self, onehot_input, n_in_channels, use_in_bias, use_in_act,
@@ -190,7 +191,6 @@ class Wavenet(torch.nn.Module):
         self.upscale = upsamp_scale
         self.downscale = 1./upsamp_scale        
 
-        # FLAG need to change forward() in case of use_conditioning=False
         self.use_conditioning = use_conditioning
         self.same_cond_each_resblock = same_cond_each_resblock
         self.use_cond_conv = use_cond_conv        
@@ -212,7 +212,7 @@ class Wavenet(torch.nn.Module):
                                                      n_cond_channels,
                                                      upsamp_conv_window,
                                                      self.upscale)
-
+        # conditioning layer
         if self.use_cond_conv:
             if self.same_cond_each_resblock:
                 cond_out_ch = 2*n_residual_channels
@@ -236,12 +236,14 @@ class Wavenet(torch.nn.Module):
                                  w_init_gain='tanh', bias=use_in_bias,
                                  use_act=use_in_act)
 
+        # skip and output layers
         if self.use_skip_out:
             self.conv_out = Conv(n_skip_channels, n_skip_to_out_channels,
                                  bias=False, w_init_gain='relu')
             self.conv_end = Conv(n_skip_to_out_channels, n_out_channels,
                                  bias=False, w_init_gain='linear')
-
+            self.out_dropout = torch.nn.Dropout(p=out_drop_prob)
+            
         # res blocks
         loop_factor = math.floor(math.log2(max_dilation)) + 1
         for i in range(n_layers):
@@ -262,11 +264,8 @@ class Wavenet(torch.nn.Module):
                 skip_layer = Conv(n_residual_channels, n_skip_channels,
                                   w_init_gain='relu', bias=self.use_skip_bias)
                 self.skip_layers.append(skip_layer)
-
+                
         self.resblock_dropout = torch.nn.Dropout(p=resblock_drop_prob)
-
-        if self.use_skip_out:
-            self.out_dropout = torch.nn.Dropout(p=out_drop_prob)
             
             
     def forward(self, forward_input, training=True):
@@ -367,11 +366,12 @@ class Wavenet(torch.nn.Module):
 
         # Add singleton time dimension
         # FLAG when I add batching, check size before adding batch dim
-        cond_input = cond_input.unsqueeze(-1)
         forward_input = forward_input.unsqueeze(-1)
-
         forward_input = self.in_layer(forward_input)
 
+        if self.use_conditioning:
+            cond_input = cond_input.unsqueeze(-1)
+        
         # Residual block loop
         for i in range(self.n_layers):
 
@@ -414,7 +414,8 @@ class Wavenet(torch.nn.Module):
     def inference(self, cond_features, use_logistic_mix = False,
                   teacher_audio=None, mu_quantization=256,
                   randomize_input=False, rand_sample_chance=0.,
-                  length=0, batch_size=0, cond_channels=0, device="cuda"): 
+                  length=0, audio_hz=16000, batch_size=0,
+                  cond_channels=0, device="cuda"): 
         """
         Generates audio samples equivalent to the length of upsampled cond features
         - Will use teacher audio as forward input, if provided
@@ -424,30 +425,35 @@ class Wavenet(torch.nn.Module):
               (length, batch_size, cond_channels, device) control unconditional output.
         """
 
-        assert((cond_features is not None) or (length > 0))
+        
+        if self.use_conditioning:
+            assert((cond_features is not None) or (length > 0))
             
-        # get metadata from condition features
-        if cond_features is not None:
-            assert(len(cond_features.size()) == 3)
+            # get metadata from condition features
+            if cond_features is not None:
+                assert(len(cond_features.size()) == 3)
 
-            device = cond_features.device
-            length = cond_features.size(-1) * self.upscale
-            cond_channels = cond_features.size(1)
-            batch_size = cond_features.size(0)
+                device = cond_features.device
+                length = cond_features.size(-1) * self.upscale
+                cond_channels = cond_features.size(1)
+                batch_size = cond_features.size(0)
 
-            if (self.upscale != 1):
-                cond_features = self.upsample(cond_features)
+                if (self.upscale != 1):
+                    cond_features = self.upsample(cond_features)
 
-        else:
-            assert(batch_size > 0 and cond_channels > 0)
-            cond_features = torch.zeros(size=[batch_size, cond_channels, length]).to(device)
+            else:
+                assert(batch_size > 0 and cond_channels > 0)
+                cond_features = torch.zeros(size=[batch_size, cond_channels, length]).to(device)
 
-        if self.use_cond_conv:
-            # make condition features for every timestep and res layer
-            cond_features = self.cond_layers(cond_features)
-        if not self.same_cond_each_resblock:
-            cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
+            if self.use_cond_conv:
+                # make condition features for every timestep and res layer
+                cond_features = self.cond_layers(cond_features)
+            if not self.same_cond_each_resblock:
+                cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
 
+        else: # no condtioning
+            length = length * audio_hz
+        
         # output buffers
         logits = torch.zeros(self.n_out_channels, length).to(device)
         output_audio = torch.zeros(size=[batch_size, length+1]).to(device)
@@ -474,11 +480,14 @@ class Wavenet(torch.nn.Module):
             if (s%100 == 0):
                 print(str(s / length), end='\r', flush=True)
 
-            if self.use_cond_conv:
-                cond_sample = cond_features[:, :, :, s]
+            if self.use_conditioning:
+                if self.use_cond_conv:
+                    cond_sample = cond_features[:, :, :, s]
+                else:
+                    cond_sample = cond_features[:, :, s]
             else:
-                cond_sample = cond_features[:, :, s]
-                
+                cond_sample = None
+                    
             # flip biased coin to see if raandom sample used
             if randomize_input and (random.uniform < rand_sample_chance):
                     forward_sample = torch.randint_like(forward_sample,
@@ -502,7 +511,39 @@ class Wavenet(torch.nn.Module):
         print("Inference complete in " + str(end_time - start_time))
             
         return utils.mu_law_decode(output_audio, mu_quantization)
+
     
+    def cond_input_for_inference(cond_features, ):
+        """
+        Helper method for preprocessing cond features for inference
+        """
+        
+        assert((cond_features is not None) or (length > 0))
+        
+        # get metadata from condition features
+        if cond_features is not None:
+            assert(len(cond_features.size()) == 3)
+
+            device = cond_features.device
+            length = cond_features.size(-1) * self.upscale
+            cond_channels = cond_features.size(1)
+            batch_size = cond_features.size(0)
+
+            if (self.upscale != 1):
+                cond_features = self.upsample(cond_features)
+
+        else:
+            assert(batch_size > 0 and cond_channels > 0)
+            cond_features = torch.zeros(size=[batch_size, cond_channels, length]).to(device)
+
+        if self.use_cond_conv:
+            # make condition features for every timestep and res layer
+            cond_features = self.cond_layers(cond_features)
+        if not self.same_cond_each_resblock:
+            cond_features = cond_features.view(batch_size, self.n_layers, 2*self.n_residual_channels, length)
+
+        return cond_features
+
     
     def export_weights(self):
         """
